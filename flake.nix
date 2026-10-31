@@ -2,6 +2,7 @@
   description = "ntwebterm - Web terminal using Ghostty's VT100 parser via WASM";
 
   inputs = {
+    self.submodules = true;
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     zig-overlay.url = "github:mitchellh/zig-overlay";
@@ -27,7 +28,7 @@
 
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "ntwebterm";
-          version = "0.3.0";
+          version = "0.4.0";
 
           src = ./.;
 
@@ -40,8 +41,10 @@
           '';
 
           installPhase = ''
-            mkdir -p $out
-            cp -r dist/* $out/
+            mkdir -p $out/dist
+            cp -r dist/* $out/dist/
+            cp ghostty-vt.wasm $out/
+            cp package.json README.md $out/
           '';
         };
       }

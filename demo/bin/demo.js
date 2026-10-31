@@ -28,6 +28,7 @@ const __dirname = path.dirname(__filename);
 
 const DEV_MODE = process.argv.includes('--dev');
 const HTTP_PORT = process.env.PORT || (DEV_MODE ? 8000 : 8080);
+const HOST = process.env.HOST || '127.0.0.1';
 
 // ============================================================================
 // Locate ntwebterm assets
@@ -461,7 +462,18 @@ const httpServer = http.createServer((req, res) => {
 
   // Serve dist files
   if (pathname.startsWith('/dist/')) {
-    const filePath = path.join(distPath, pathname.slice(6));
+    if (!distPath) {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+    const resolvedDistRoot = path.resolve(distPath);
+    const filePath = path.resolve(resolvedDistRoot, '.' + pathname.slice(5));
+    if (filePath !== resolvedDistRoot && !filePath.startsWith(resolvedDistRoot + path.sep)) {
+      res.writeHead(403);
+      res.end('Forbidden');
+      return;
+    }
     serveFile(filePath, res);
     return;
   }
@@ -527,13 +539,40 @@ function createPtySession(cols, rows) {
 // WebSocket server attached to HTTP server (same port)
 const wss = new WebSocketServer({ noServer: true });
 
+function isAllowedOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(origin);
+  } catch {
+    return false;
+  }
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || '';
+  const firstHost = String(hostHeader).split(',')[0].trim();
+  if (firstHost && parsedOrigin.host === firstHost) {
+    return true;
+  }
+  const port = String(HTTP_PORT);
+  const allowedHosts = new Set([
+    `localhost:${port}`,
+    `127.0.0.1:${port}`,
+    `[::1]:${port}`,
+    `${HOST}:${port}`,
+  ]);
+  return allowedHosts.has(parsedOrigin.host);
+}
+
 // Handle HTTP upgrade for WebSocket connections
 httpServer.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (url.pathname === '/ws') {
-    // In production, consider validating req.headers.origin to prevent CSRF
-    // For development/demo purposes, we allow all origins
+    if (!isAllowedOrigin(req)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });
@@ -667,6 +706,7 @@ if (DEV_MODE) {
   const vite = await createServer({
     root: repoRoot,
     server: {
+      host: HOST,
       port: HTTP_PORT,
       strictPort: true,
     },
@@ -683,6 +723,11 @@ if (DEV_MODE) {
 
       // ONLY handle /ws - everything else passes through unchanged to Vite
       if (pathname === '/ws') {
+        if (!isAllowedOrigin(req)) {
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
         if (!socket.destroyed && !socket.readableEnded) {
           wss.handleUpgrade(req, socket, head, (ws) => {
             wss.emit('connection', ws, req);
@@ -702,7 +747,7 @@ if (DEV_MODE) {
   printBanner(`http://localhost:${HTTP_PORT}/demo/`);
 } else {
   // Production mode: static file server
-  httpServer.listen(HTTP_PORT, () => {
+  httpServer.listen(HTTP_PORT, HOST, () => {
     printBanner(`http://localhost:${HTTP_PORT}`);
   });
 }

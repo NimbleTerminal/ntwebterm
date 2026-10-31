@@ -6,8 +6,9 @@
 
 ```bash
 bun install                          # Install dependencies
-bun test                            # Run test suite (95 tests)
-bun run dev                         # Start Vite dev server (http://localhost:8000)
+bun run build:wasm                   # Build ghostty-vt.wasm (requires Zig 0.17.0)
+bun test                             # Run test suite
+bun run dev                          # Start Vite dev server (http://localhost:8000)
 ```
 
 **Before committing, always run:**
@@ -19,9 +20,10 @@ bun run fmt && bun run lint && bun run typecheck && bun test && bun run build
 **Run interactive terminal demo:**
 
 ```bash
-cd demo/server && bun install && bun run start  # Terminal 1: PTY server
-bun run dev                                     # Terminal 2: Web server
-# Open: http://localhost:8000/demo/
+cd demo && bun install && cd ..      # Install demo server dependencies (once)
+bun run demo:dev                     # Vite dev server + WebSocket PTY on http://localhost:8000/demo/
+# Or serve the production bundle on http://localhost:8080:
+bun run build && bun run demo
 ```
 
 ## Project State
@@ -43,8 +45,8 @@ This is a **fully functional terminal emulator** (MVP complete) that uses Ghostt
 
 - TypeScript + Bun runtime for tests
 - Vite for dev server and bundling
-- Ghostty WASM (404 KB, committed) for VT100 parsing
-- Canvas API for rendering
+- Ghostty WASM (built via `bun run build:wasm` with Zig 0.17.0; prebuilt on the `built` branch) for VT100 parsing
+- Canvas2D, WebGL2, and WebGPU renderers
 
 ## Architecture
 
@@ -74,16 +76,16 @@ Ghostty WASM Bridge (lib/ghostty.ts)
 
 ### Key Files
 
-| File                        | Lines | Purpose                             |
-| --------------------------- | ----- | ----------------------------------- |
-| `lib/terminal.ts`           | 427   | Main Terminal class, xterm.js API   |
-| `lib/ghostty.ts`            | 552   | WASM bridge, memory management      |
-| `lib/renderer-canvas2d.ts`  | ~1700 | Canvas2D renderer (CanvasRenderer)  |
-| `lib/input-handler.ts`      | 438   | Keyboard → escape sequences         |
-| `lib/selection-manager.ts`  | 442   | Text selection + clipboard          |
-| `lib/types.ts`              | 454   | TypeScript definitions for WASM ABI |
-| `lib/addons/fit.ts`         | 240   | Responsive terminal sizing          |
-| `demo/server/pty-server.ts` | 284   | WebSocket PTY server (real shell)   |
+| File                       | Lines | Purpose                             |
+| -------------------------- | ----- | ----------------------------------- |
+| `lib/terminal.ts`          | 427   | Main Terminal class, xterm.js API   |
+| `lib/ghostty.ts`           | 552   | WASM bridge, memory management      |
+| `lib/renderer-canvas2d.ts` | ~1700 | Canvas2D renderer (CanvasRenderer)  |
+| `lib/input-handler.ts`     | 438   | Keyboard → escape sequences         |
+| `lib/selection-manager.ts` | 442   | Text selection + clipboard          |
+| `lib/types.ts`             | 454   | TypeScript definitions for WASM ABI |
+| `lib/addons/fit.ts`        | 240   | Responsive terminal sizing          |
+| `demo/bin/demo.js`         | ~710  | HTTP + WebSocket PTY demo server    |
 
 ### WASM Integration Pattern
 
@@ -144,12 +146,15 @@ bun test -t "test name pattern"       # Run matching tests
 
 ### Running Demos
 
-**⚠️ CRITICAL: Use Vite dev server!** Plain HTTP server won't handle TypeScript imports.
+**⚠️ CRITICAL: Use Vite dev server or `demo/bin/demo.js`!** Plain HTTP server won't handle TypeScript imports.
 
 ```bash
-# ✅ CORRECT
-bun run dev                           # Vite with TS support
-# Open: http://localhost:8000/demo/
+# ✅ CORRECT (interactive shell demo with PTY WebSocket on /ws)
+cd demo && bun install && cd ..
+bun run demo:dev                      # Vite + PTY server (http://localhost:8000/demo/)
+
+# ✅ CORRECT (static demos only, no PTY server)
+bun run dev                           # Vite with TS support (http://localhost:8000/demo/colors-demo.html)
 
 # ❌ WRONG
 python3 -m http.server                # Can't handle .ts imports
@@ -157,8 +162,9 @@ python3 -m http.server                # Can't handle .ts imports
 
 **Available demos:**
 
-- `demo/index.html` - Interactive shell terminal (requires PTY server)
-- `demo/colors-demo.html` - ANSI color showcase (no server needed)
+- `demo/index.html` - Interactive shell terminal (requires `bun run demo:dev` or `bun run demo` for `/ws` PTY)
+- `demo/colors-demo.html` - ANSI color showcase (no PTY server needed)
+- `demo/scrollbar-test.html` - Scrollback and scrollbar test (no PTY server needed)
 
 ### Type Checking
 
@@ -319,11 +325,11 @@ python3 -m http.server
 
 **Why:** Demos import TypeScript modules directly (`from './lib/terminal.ts'`). Need Vite to transpile.
 
-### 2. **WASM Binary is Committed**
+### 2. **WASM Binary and `dist/` are Gitignored on `main`**
 
-- `ghostty-vt.wasm` (404 KB) is in the repo
-- Don't need to rebuild unless updating Ghostty version
-- Rebuild instructions in README.md if needed
+- `ghostty-vt.wasm` and `dist/` are generated build outputs and are gitignored on `main`
+- Run `bun run build:wasm` (requires Zig 0.17.0) before running tests or demos on a fresh checkout, or `bun run build` to build both WASM and `dist/`
+- Only the `built` branch carries prebuilt `ghostty-vt.wasm` and `dist/` artifacts
 
 ### 3. **Test Timeouts**
 
@@ -349,16 +355,23 @@ const view = new Uint8Array(this.getBuffer(), ptr, size);
 
 ### 5. **PTY Server Required for Interactive Demos**
 
-```bash
-# Terminal needs PTY server running
-cd demo/server
-bun run start
+`bun run dev` alone only starts Vite and does not attach the PTY WebSocket server, so `demo/index.html` will stay disconnected. Use `demo/bin/demo.js`:
 
-# Then access from browser
-# http://localhost:8000/demo/
+```bash
+# Install demo dependencies once
+cd demo && bun install && cd ..
+
+# Dev mode: Vite + same-origin /ws PTY server on port 8000
+bun run demo:dev
+# Open: http://localhost:8000/demo/
+
+# Production mode: serves built dist/ + /ws PTY server on port 8080
+bun run build
+bun run demo
+# Open: http://localhost:8080/
 ```
 
-**WebSocket connects to:** `ws://localhost:3001/ws` (or current hostname)
+**WebSocket connects to:** same-origin `/ws` (`ws://localhost:8000/ws` in `--dev` mode, or `ws://localhost:8080/ws` in production mode)
 
 ### 6. **Canvas Rendering Requires Container Resize**
 
