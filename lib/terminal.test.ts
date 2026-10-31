@@ -3739,3 +3739,255 @@ describe('Terminal cursor shape (DECSCUSR)', () => {
     term.dispose();
   });
 });
+
+describe('Review regressions (Terminal & WASM)', () => {
+  test('reset() resets in-place and keeps SelectionManager bound to the live terminal', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    await term.open(container);
+
+    const handleBefore = term.wasmTerm!.getHandle();
+    term.write('Before reset\r\n');
+    term.reset();
+
+    expect(term.wasmTerm!.getHandle()).toBe(handleBefore);
+    term.write('After reset');
+    term.select(0, 0, 11);
+    expect(term.getSelection()).toBe('After reset');
+
+    term.dispose();
+  });
+
+  test('write() while scrolled up preserves history viewport instead of snapping to bottom', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 5, scrollback: 100 });
+    await term.open(container);
+
+    for (let i = 0; i < 15; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+    term.scrollLines(-5);
+    expect(term.getViewportY()).toBe(5);
+
+    // Writing a new line that pushes 1 more row into scrollback should keep the
+    // user looking at the same history rows (viewportY increments by 1), not 0.
+    term.write('New line\r\n');
+    expect(term.getViewportY()).toBe(6);
+
+    term.dispose();
+  });
+
+  test('resize() clamps viewportY to the available scrollback length', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 5, scrollback: 100 });
+    await term.open(container);
+
+    for (let i = 0; i < 10; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+    term.scrollToTop();
+    expect(term.getViewportY()).toBeGreaterThan(0);
+
+    term.resize(40, 20);
+    expect(term.getViewportY()).toBeLessThanOrEqual(term.getScrollbackLength());
+
+    term.dispose();
+  });
+
+  test('BELL and TITLE_CHANGED fire via WASM parser callbacks (including split OSC)', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    await term.open(container);
+
+    let bells = 0;
+    const titles: string[] = [];
+    term.onBell(() => {
+      bells++;
+    });
+    term.onTitleChange((t) => {
+      titles.push(t);
+    });
+
+    // Split OSC 2 title sequence terminated by BEL (0x07): should change title
+    // and NOT fire an audible bell.
+    term.write('\x1b]2;Split ');
+    term.write('Title\x07');
+    expect(titles).toEqual(['Split Title']);
+    expect(bells).toBe(0);
+
+    // Real BEL character fires onBell.
+    term.write('\x07');
+    expect(bells).toBe(1);
+
+    term.dispose();
+  });
+
+  test('pure black (#000000) theme colors are applied as 0 rather than skipped', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({
+      cols: 20,
+      rows: 5,
+      theme: {
+        foreground: '#000000',
+        background: '#000000',
+        cursor: '#000000',
+        black: '#000000',
+      },
+    });
+    const cfg = (term as any).buildWasmConfig();
+    expect(cfg?.fgColor).toBe(0);
+    expect(cfg?.bgColor).toBe(0);
+    expect(cfg?.cursorColor).toBe(0);
+    expect(cfg?.palette?.[0]).toBe(0);
+    await term.open(container);
+    term.dispose();
+  });
+
+  test('buffer.normal and buffer.alternate are isolated and onBufferChange fires', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 20, rows: 5 });
+    await term.open(container);
+
+    const changes: string[] = [];
+    term.buffer.onBufferChange((buf) => {
+      changes.push(buf.type);
+    });
+
+    term.write('NormalText');
+    expect(term.buffer.normal.getLine(0)?.translateToString(true)).toBe('NormalText');
+    expect(term.buffer.alternate.getLine(0)?.translateToString(true)).toBe('');
+
+    term.write('\x1b[?1049hAltText');
+    expect(changes).toContain('alternate');
+    expect(term.buffer.active.type).toBe('alternate');
+    expect(term.buffer.alternate.getLine(0)?.translateToString(true)).toBe('AltText');
+    expect(term.buffer.normal.getLine(0)?.translateToString(true)).toBe('');
+
+    term.write('\x1b[?1049l');
+    expect(changes).toEqual(['alternate', 'normal']);
+
+    term.dispose();
+  });
+
+  test('buffer.active.viewportY and baseY reflect scrollback and scroll position', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 20, rows: 4, scrollback: 100 });
+    await term.open(container);
+
+    for (let i = 0; i < 10; i++) {
+      term.write(`Row ${i}\r\n`);
+    }
+    const sbLen = term.getScrollbackLength();
+    expect(term.buffer.active.baseY).toBe(sbLen);
+    expect(term.buffer.active.viewportY).toBe(0);
+
+    term.scrollLines(-3);
+    expect(term.buffer.active.viewportY).toBe(3);
+
+    term.dispose();
+  });
+
+  test('BufferCell.getChars returns empty string on spacer cells and preserves scrollback graphemes and wrap flag', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 10, rows: 3, scrollback: 100 });
+    await term.open(container);
+
+    // Write wide CJK char on active screen
+    term.write('中A');
+    const line0 = term.buffer.active.getLine(0)!;
+    expect(line0.getCell(0)?.getChars()).toBe('中');
+    expect(line0.getCell(1)?.getWidth()).toBe(0);
+    expect(line0.getCell(1)?.getChars()).toBe('');
+    expect(line0.translateToString(true)).toBe('中A');
+
+    // Write combining mark + soft wrap that scrolls into scrollback
+    term.reset();
+    term.write('e\u0301123456789WRAP\r\nNext1\r\nNext2\r\nNext3\r\n');
+    const sbLine0 = term.buffer.active.getLine(0)!;
+    const sbLine1 = term.buffer.active.getLine(1)!;
+    expect(sbLine0.getCell(0)?.getChars()).toBe('e\u0301');
+    expect(sbLine1.isWrapped).toBe(true);
+
+    term.dispose();
+  });
+
+  test('distinct OSC 8 hyperlinks receive distinct hyperlink_id values', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 5 });
+    await term.open(container);
+
+    term.write(
+      '\x1b]8;;https://one.example\x07ONE\x1b]8;;\x07 \x1b]8;;https://two.example\x07TWO\x1b]8;;\x07'
+    );
+    const cells = term.wasmTerm!.getLine(0)!;
+    expect(cells[0]!.hyperlink_id).toBeGreaterThan(0);
+    expect(cells[4]!.hyperlink_id).toBeGreaterThan(0);
+    expect(cells[0]!.hyperlink_id).not.toBe(cells[4]!.hyperlink_id);
+
+    term.dispose();
+  });
+
+  test('alternate screen wheel emits DECCKM application cursor sequences and accumulates small deltas', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    await term.open(container);
+
+    const data: string[] = [];
+    term.onData((d) => data.push(d));
+
+    // Enter alternate screen + enable DECCKM (mode 1)
+    term.write('\x1b[?1049h\x1b[?1h');
+
+    // Two fractional trackpad wheel events of -18 each (total -36 -> 1 tick up)
+    term.element!.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -18,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        cancelable: true,
+      })
+    );
+    expect(data).toEqual([]);
+    term.element!.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: -18,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        cancelable: true,
+      })
+    );
+    expect(data).toEqual(['\x1bOA']);
+
+    term.dispose();
+  });
+
+  test('Terminal.paste() sanitizes bracketed paste end markers', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    await term.open(container);
+
+    const data: string[] = [];
+    term.onData((d) => data.push(d));
+    term.write('\x1b[?2004h');
+
+    term.paste('safe\x1b[201~evil');
+    expect(data).toEqual(['\x1b[200~safeevil\x1b[201~']);
+
+    term.dispose();
+  });
+
+  test('onCursorMove fires on horizontal cursor movement within the same row', async () => {
+    const container = document.createElement('div');
+    const term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    await term.open(container);
+
+    let moves = 0;
+    term.onCursorMove(() => {
+      moves++;
+    });
+
+    term.write('hello');
+    (term as any).renderTick();
+    expect(moves).toBe(1);
+
+    term.dispose();
+  });
+});

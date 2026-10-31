@@ -745,4 +745,38 @@ describe('SelectionManager', () => {
       term.dispose();
     });
   });
+
+  describe('Wide characters, soft-wrap, and scrollback graphemes', () => {
+    test('wide CJK characters do not copy extra spaces for width-0 spacer cells', async () => {
+      if (!container) return;
+      const term = await createIsolatedTerminal({ cols: 20, rows: 5 });
+      await term.open(container);
+      term.write('中文测试');
+      term.select(0, 0, 8);
+      expect(term.getSelection()).toBe('中文测试');
+      term.dispose();
+    });
+
+    test('soft-wrapped lines omit newline while hard-wrapped lines include newline', async () => {
+      if (!container) return;
+      const term = await createIsolatedTerminal({ cols: 10, rows: 3 });
+      await term.open(container);
+      term.write('0123456789ABCDEF\r\nSecond');
+      term.selectAll();
+      expect(term.getSelection()).toBe('0123456789ABCDEF\nSecond');
+      term.dispose();
+    });
+
+    test('selectAll() and scrollback grapheme selection include scrollback lines and combining marks', async () => {
+      if (!container) return;
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3, scrollback: 50 });
+      await term.open(container);
+      term.write('e\u0301-scroll\r\nRow2\r\nRow3\r\nRow4');
+      term.selectAll();
+      const all = term.getSelection();
+      expect(all).toContain('e\u0301-scroll');
+      expect(all).toContain('Row4');
+      term.dispose();
+    });
+  });
 });

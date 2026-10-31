@@ -12,6 +12,30 @@
 
 import type { IBufferRange, ILink, ILinkProvider } from '../types';
 
+const ALLOWED_LINK_PROTOCOLS = new Set([
+  'http:',
+  'https:',
+  'mailto:',
+  'ftp:',
+  'ftps:',
+  'ssh:',
+  'git:',
+  'tel:',
+  'magnet:',
+  'gemini:',
+  'gopher:',
+  'news:',
+]);
+
+export function isSafeExternalUrl(rawUri: string): boolean {
+  try {
+    const parsed = new URL(rawUri);
+    return ALLOWED_LINK_PROTOCOLS.has(parsed.protocol.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 /**
  * OSC 8 Hyperlink Provider
  *
@@ -91,6 +115,10 @@ export class OSC8LinkProvider implements ILinkProvider {
           visitedPositions.add(col);
         }
 
+        if (!isSafeExternalUrl(uri)) {
+          continue;
+        }
+
         const range: IBufferRange = {
           start: { x, y },
           end: { x: endX, y },
@@ -100,8 +128,8 @@ export class OSC8LinkProvider implements ILinkProvider {
           text: uri,
           range,
           activate: (event) => {
-            // Open link if Ctrl/Cmd is pressed
-            if (event.ctrlKey || event.metaKey) {
+            // Open link if Ctrl/Cmd is pressed and scheme is allowlisted
+            if ((event.ctrlKey || event.metaKey) && isSafeExternalUrl(uri)) {
               window.open(uri, '_blank', 'noopener,noreferrer');
             }
           },

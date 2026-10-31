@@ -32,6 +32,7 @@
   (type $write_pty_sig (func (param i32 i32 i32 i32)))
   (type $size_sig (func (param i32 i32 i32) (result i32)))
   (type $decode_png_sig (func (param i32 i32 i32 i32 i32) (result i32)))
+  (type $notify_sig (func (param i32 i32)))
 
   (import "env" "write_pty_cb" (func $write_pty_cb (type $write_pty_sig)))
   (import "env" "size_cb" (func $size_cb (type $size_sig)))
@@ -40,6 +41,9 @@
   (import "env" "read_shm_cb" (func $read_shm_cb (type $decode_png_sig)))
 
   (import "env" "program_status_cb" (func $program_status_cb (type $program_status_sig)))
+  (import "env" "bell_cb" (func $bell_cb (type $notify_sig)))
+  (import "env" "title_changed_cb" (func $title_changed_cb (type $notify_sig)))
+  (import "env" "render_hold_cb" (func $render_hold_cb (type $program_status_sig)))
 
   (func $program_status_fwd (export "program_status_fwd") (type $program_status_sig)
     local.get 0 local.get 1 local.get 2
@@ -59,4 +63,16 @@
 
   (func $read_shm_fwd (export "read_shm_fwd") (type $decode_png_sig)
     local.get 0  local.get 1  local.get 2  local.get 3  local.get 4
-    call $read_shm_cb))
+    call $read_shm_cb)
+
+  (func $bell_fwd (export "bell_fwd") (type $notify_sig)
+    local.get 0  local.get 1
+    call $bell_cb)
+
+  (func $title_changed_fwd (export "title_changed_fwd") (type $notify_sig)
+    local.get 0  local.get 1
+    call $title_changed_cb)
+
+  (func $render_hold_fwd (export "render_hold_fwd") (type $program_status_sig)
+    local.get 0  local.get 1  local.get 2
+    call $render_hold_cb))

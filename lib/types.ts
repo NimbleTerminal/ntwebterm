@@ -385,6 +385,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_key_encoder_new(allocator: number, encoderPtrPtr: number): number;
   ghostty_key_encoder_free(encoder: number): void;
   ghostty_key_encoder_setopt(encoder: number, option: number, valuePtr: number): number;
+  ghostty_key_encoder_setopt_from_terminal(encoder: number, terminal: TerminalHandle): void;
   ghostty_key_encoder_encode(
     encoder: number,
     eventPtr: number,
@@ -400,6 +401,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_key_event_set_key(event: number, key: number): void;
   ghostty_key_event_set_mods(event: number, mods: number): void;
   ghostty_key_event_set_utf8(event: number, ptr: number, len: number): void;
+  ghostty_key_event_set_unshifted_codepoint(event: number, codepoint: number): void;
 
   // Terminal lifecycle
   ghostty_terminal_new(
@@ -409,6 +411,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     rows: number
   ): number; // GhosttyResult (0 = success)
   ghostty_terminal_free(terminal: TerminalHandle): void;
+  ghostty_terminal_reset(terminal: TerminalHandle): void;
   ghostty_terminal_resize(
     terminal: TerminalHandle,
     cols: number,
@@ -713,6 +716,8 @@ export enum TerminalOption {
   SCROLLBACK_MAX_LINES = 28,
   MODE_DEFAULT = 33,
   MODE = 34,
+  RENDER_HOLD = 41,
+  RESET = 43,
   PROGRAM_STATUS = 46,
 }
 
@@ -1021,7 +1026,7 @@ export interface GhosttyTerminalConfig {
   fgColor?: number;
   bgColor?: number;
   cursorColor?: number;
-  palette?: number[];
+  palette?: (number | undefined)[];
 }
 
 /**

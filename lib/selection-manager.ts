@@ -68,6 +68,9 @@ export class SelectionManager {
   private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
   private boundClickHandler: ((e: MouseEvent) => void) | null = null;
   private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundDocumentMouseDownHandler: ((e: MouseEvent) => void) | null = null;
+  private contextMenuTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private boundResetTextarea: (() => void) | null = null;
 
   // Auto-scroll state for drag selection
   private autoScrollInterval: ReturnType<typeof setInterval> | null = null;
@@ -193,10 +196,16 @@ export class SelectionManager {
       let lineText = '';
       for (const col of logicalCols) {
         const cell = line[col];
+        // Skip wide-character continuation spacer cells (width === 0)
+        if (cell && cell.width === 0) {
+          continue;
+        }
         if (cell && cell.codepoint !== 0) {
           // Use grapheme lookup for cells with multi-codepoint characters
           let char: string;
-          if (cell.grapheme_len > 0) {
+          if (cell.grapheme && cell.grapheme.length > 0) {
+            char = String.fromCodePoint(cell.codepoint, ...cell.grapheme);
+          } else if (cell.grapheme_len > 0) {
             // Row is in scrollback or screen - determine which and use appropriate method
             if (absRow < scrollbackLength) {
               char = this.wasmTerm.getScrollbackGraphemeString(absRow, col);
@@ -225,9 +234,16 @@ export class SelectionManager {
 
       text += lineText;
 
-      // Add newline between rows (but not after the last row)
+      // Add newline between rows unless the next row is a soft-wrap continuation
       if (absRow < endAbsRow) {
-        text += '\n';
+        const nextAbsRow = absRow + 1;
+        const isNextRowWrapped =
+          nextAbsRow < scrollbackLength
+            ? this.wasmTerm.isScrollbackRowWrapped(nextAbsRow)
+            : this.wasmTerm.isRowWrapped(nextAbsRow - scrollbackLength);
+        if (!isNextRowWrapped) {
+          text += '\n';
+        }
       }
     }
 
@@ -289,10 +305,10 @@ export class SelectionManager {
    */
   selectAll(): void {
     const dims = this.wasmTerm.getDimensions();
-    const viewportY = this.getViewportY();
+    const scrollbackLength = this.wasmTerm.getScrollbackLength();
     this.selectionColumnSpace = 'logical';
-    this.selectionStart = { col: 0, absoluteRow: viewportY };
-    this.selectionEnd = { col: dims.cols - 1, absoluteRow: viewportY + dims.rows - 1 };
+    this.selectionStart = { col: 0, absoluteRow: 0 };
+    this.selectionEnd = { col: dims.cols - 1, absoluteRow: scrollbackLength + dims.rows - 1 };
     this.requestRender();
     this.selectionChangedEmitter.fire();
   }
@@ -321,10 +337,9 @@ export class SelectionManager {
     endRow = Math.min(endRow, dims.rows - 1);
 
     // Convert viewport rows to absolute rows
-    const viewportY = this.getViewportY();
     this.selectionColumnSpace = 'logical';
-    this.selectionStart = { col: column, absoluteRow: viewportY + row };
-    this.selectionEnd = { col: endCol, absoluteRow: viewportY + endRow };
+    this.selectionStart = { col: column, absoluteRow: this.viewportRowToAbsolute(row) };
+    this.selectionEnd = { col: endCol, absoluteRow: this.viewportRowToAbsolute(endRow) };
     this.requestRender();
     this.selectionChangedEmitter.fire();
   }
@@ -444,6 +459,22 @@ export class SelectionManager {
     if (this.boundDocumentMouseMoveHandler) {
       document.removeEventListener('mousemove', this.boundDocumentMouseMoveHandler);
       this.boundDocumentMouseMoveHandler = null;
+    }
+
+    // Clean up document mousedown listener
+    if (this.boundDocumentMouseDownHandler) {
+      document.removeEventListener('mousedown', this.boundDocumentMouseDownHandler);
+      this.boundDocumentMouseDownHandler = null;
+    }
+
+    // Clean up pending context-menu timer and listeners
+    if (this.contextMenuTimeoutId !== null) {
+      clearTimeout(this.contextMenuTimeoutId);
+      this.contextMenuTimeoutId = null;
+    }
+    if (this.boundResetTextarea) {
+      this.boundResetTextarea();
+      this.boundResetTextarea = null;
     }
 
     // Clean up context menu event listener
@@ -608,9 +639,10 @@ export class SelectionManager {
     document.addEventListener('mousemove', this.boundDocumentMouseMoveHandler);
 
     // Track mousedown on document to know if a click started inside the canvas
-    document.addEventListener('mousedown', (e: MouseEvent) => {
+    this.boundDocumentMouseDownHandler = (e: MouseEvent) => {
       this.mouseDownTarget = e.target;
-    });
+    };
+    document.addEventListener('mousedown', this.boundDocumentMouseDownHandler);
 
     // CRITICAL FIX: Listen for mouseup on DOCUMENT, not just canvas
     // This catches mouseup events that happen outside the canvas (common during drag)
@@ -737,7 +769,14 @@ export class SelectionManager {
 
       // After a short delay, restore the textarea to its hidden state
       // This allows the context menu to appear first
-      setTimeout(() => {
+      if (this.contextMenuTimeoutId !== null) {
+        clearTimeout(this.contextMenuTimeoutId);
+      }
+      if (this.boundResetTextarea) {
+        this.boundResetTextarea();
+      }
+      this.contextMenuTimeoutId = setTimeout(() => {
+        this.contextMenuTimeoutId = null;
         // Listen for when the context menu closes (user clicks away or selects an option)
         const resetTextarea = () => {
           this.textarea.style.pointerEvents = 'none';
@@ -752,7 +791,11 @@ export class SelectionManager {
           document.removeEventListener('click', resetTextarea);
           document.removeEventListener('contextmenu', resetTextarea);
           this.textarea.removeEventListener('blur', resetTextarea);
+          if (this.boundResetTextarea === resetTextarea) {
+            this.boundResetTextarea = null;
+          }
         };
+        this.boundResetTextarea = resetTextarea;
 
         // Reset on any of these events (menu closed)
         document.addEventListener('click', resetTextarea, { once: true });
@@ -963,23 +1006,35 @@ export class SelectionManager {
     if (!line) return null;
 
     const map = this.bidiMapper.getMap(line);
-    const lcol =
+    let lcol =
       map.isIdentity || col >= map.visualToLogical.length ? col : map.visualToLogical[col]!;
+    if (line[lcol]?.width === 0 && lcol > 0 && line[lcol - 1]?.width === 2) {
+      lcol--;
+    }
 
     // Word characters: Unicode letters/digits plus common path/URL chars.
     // \p{L}\p{N} (not \w) so RTL scripts are word chars too.
-    const isWordChar = (cell: GhosttyCell) => {
+    const isWordCharCell = (cell: GhosttyCell | undefined) => {
       if (!cell || cell.codepoint === 0) return false;
       const char = String.fromCodePoint(cell.codepoint);
       return /[\p{L}\p{N}_\-./~@+]/u.test(char);
     };
 
-    if (!isWordChar(line[lcol])) return null;
+    const isWordCharAt = (idx: number): boolean => {
+      const cell = line![idx];
+      if (!cell) return false;
+      if (cell.width === 0) {
+        return idx > 0 && line![idx - 1]?.width === 2 && isWordCharCell(line![idx - 1]);
+      }
+      return isWordCharCell(cell);
+    };
+
+    if (!isWordCharAt(lcol)) return null;
 
     let startCol = lcol;
-    while (startCol > 0 && isWordChar(line[startCol - 1])) startCol--;
+    while (startCol > 0 && isWordCharAt(startCol - 1)) startCol--;
     let endCol = lcol;
-    while (endCol < line.length - 1 && isWordChar(line[endCol + 1])) endCol++;
+    while (endCol < line.length - 1 && isWordCharAt(endCol + 1)) endCol++;
 
     // Keep the exact logical range. A word can contain both LTR and RTL
     // characters, so its visual cells are not necessarily contiguous.

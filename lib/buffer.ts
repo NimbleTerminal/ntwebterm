@@ -128,34 +128,34 @@ export class Buffer implements IBuffer {
 
   get cursorX(): number {
     const wasmTerm = this.getWasmTerm();
-    if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().x;
+    if (!wasmTerm || !this.isActive(wasmTerm)) return 0;
+    return wasmTerm.getLogicalCursor().x;
   }
 
   get cursorY(): number {
     const wasmTerm = this.getWasmTerm();
-    if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().y;
+    if (!wasmTerm || !this.isActive(wasmTerm)) return 0;
+    return wasmTerm.getLogicalCursor().y;
   }
 
   get viewportY(): number {
-    // Get viewport offset from Terminal
-    // For now, return 0 (no scrollback navigation implemented yet)
-    return 0;
+    const wasmTerm = this.getWasmTerm();
+    if (!wasmTerm || !this.isActive(wasmTerm) || this.bufferType === 'alternate') return 0;
+    return Math.floor(this.terminal.getViewportY());
   }
 
   get baseY(): number {
-    // For normal buffer: 0
-    // For alternate buffer: 0 (alternate has no scrollback)
-    return 0;
+    const wasmTerm = this.getWasmTerm();
+    if (!wasmTerm || !this.isActive(wasmTerm) || this.bufferType === 'alternate') return 0;
+    return wasmTerm.getScrollbackLength();
   }
 
   get length(): number {
     const wasmTerm = this.getWasmTerm();
     if (!wasmTerm) return 0;
 
-    if (this.bufferType === 'alternate') {
-      // Alternate buffer has no scrollback, just visible rows
+    if (this.bufferType === 'alternate' || !this.isActive(wasmTerm)) {
+      // Alternate buffer (or inactive buffer) has no addressable scrollback, just visible rows
       return wasmTerm.rows;
     } else {
       // Normal buffer: scrollback + visible rows
@@ -173,8 +173,13 @@ export class Buffer implements IBuffer {
       return undefined;
     }
 
+    // Do not alias the active screen's grid onto the inactive buffer
+    if (!this.isActive(wasmTerm)) {
+      return new BufferLine([], false, wasmTerm.cols);
+    }
+
     // Determine if accessing scrollback or visible screen
-    const scrollbackLength = wasmTerm.getScrollbackLength();
+    const scrollbackLength = this.bufferType === 'normal' ? wasmTerm.getScrollbackLength() : 0;
     let cells: GhosttyCell[] | null;
     let lineNumber: number;
     let isWrapped: boolean;
@@ -186,9 +191,7 @@ export class Buffer implements IBuffer {
       // So scrollbackOffset = y directly!
       const scrollbackOffset = y;
       cells = wasmTerm.getScrollbackLine(scrollbackOffset);
-      // TODO: We'd need WASM API to check if scrollback line is wrapped
-      // For now, assume not wrapped
-      isWrapped = false;
+      isWrapped = wasmTerm.isScrollbackRowWrapped(scrollbackOffset);
     } else {
       // Accessing visible screen
       lineNumber = this.bufferType === 'normal' ? y - scrollbackLength : y;
@@ -205,6 +208,11 @@ export class Buffer implements IBuffer {
 
   getNullCell(): IBufferCell {
     return this.nullCell;
+  }
+
+  private isActive(wasmTerm: GhosttyTerminal): boolean {
+    const isAlt = wasmTerm.isAlternateScreen();
+    return this.bufferType === 'alternate' ? isAlt : !isAlt;
   }
 
   private getWasmTerm(): GhosttyTerminal | undefined {
@@ -310,19 +318,22 @@ export class BufferCell implements IBufferCell {
   getChars(): string {
     const codepoint = this.cell.codepoint;
 
-    // Return empty string for null character or invalid codepoints
-    if (codepoint === 0) {
+    // Return empty string for null character or wide-character spacer cells
+    if (codepoint === 0 || this.cell.width === 0) {
       return '';
     }
 
-    // Validate codepoint is within valid Unicode range
-    // Valid: 0x0000 to 0x10FFFF, excluding surrogates (0xD800-0xDFFF)
-    if (codepoint < 0 || codepoint > 0x10ffff || (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
-      // Return replacement character for invalid codepoints
-      return '\uFFFD';
+    const toValidCodePoint = (cp: number): number =>
+      cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) ? 0xfffd : cp;
+
+    if (this.cell.grapheme && this.cell.grapheme.length > 0) {
+      return String.fromCodePoint(
+        toValidCodePoint(codepoint),
+        ...this.cell.grapheme.map(toValidCodePoint)
+      );
     }
 
-    return String.fromCodePoint(codepoint);
+    return String.fromCodePoint(toValidCodePoint(codepoint));
   }
 
   getCode(): number {

@@ -13,8 +13,7 @@
  * - Captures all keyboard input (preventDefault on everything)
  */
 
-import type { Ghostty } from './ghostty';
-import type { KeyEncoder } from './ghostty';
+import type { Ghostty, GhosttyTerminal, KeyEncoder } from './ghostty';
 import type { IKeyEvent } from './interfaces';
 import { Key, KeyAction, KeyEncoderOption, Mods } from './types';
 
@@ -191,7 +190,9 @@ export class InputHandler {
   private getModeCallback?: (mode: number) => boolean;
   private onCopyCallback?: () => boolean;
   private mouseConfig?: MouseTrackingConfig;
+  private getTerminalCallback?: () => GhosttyTerminal | undefined;
   private keydownListener: ((e: KeyboardEvent) => void) | null = null;
+  private keyupListener: ((e: KeyboardEvent) => void) | null = null;
   private keypressListener: ((e: KeyboardEvent) => void) | null = null;
   private pasteListener: ((e: ClipboardEvent) => void) | null = null;
   private beforeInputListener: ((e: InputEvent) => void) | null = null;
@@ -205,6 +206,9 @@ export class InputHandler {
   private isComposing = false;
   private isDisposed = false;
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
+  private lastMouseMoveCol = -1;
+  private lastMouseMoveRow = -1;
+  private lastMouseMoveButton = -1;
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
   private lastPasteData: string | null = null;
@@ -239,9 +243,12 @@ export class InputHandler {
     getMode?: (mode: number) => boolean,
     onCopy?: () => boolean,
     inputElement?: HTMLElement,
-    mouseConfig?: MouseTrackingConfig
+    mouseConfig?: MouseTrackingConfig,
+    getTerminal?: () => GhosttyTerminal | undefined
   ) {
     this.encoder = ghostty.createKeyEncoder();
+    // DEC mode 1036 (alt_esc_prefix) defaults to true in Ghostty
+    this.encoder.setOption(KeyEncoderOption.ALT_ESC_PREFIX, true);
     this.container = container;
     this.inputElement = inputElement;
     this.onDataCallback = onData;
@@ -251,6 +258,7 @@ export class InputHandler {
     this.getModeCallback = getMode;
     this.onCopyCallback = onCopy;
     this.mouseConfig = mouseConfig;
+    this.getTerminalCallback = getTerminal;
 
     // Attach event listeners
     this.attach();
@@ -284,6 +292,9 @@ export class InputHandler {
 
     this.keydownListener = this.handleKeyDown.bind(this);
     this.container.addEventListener('keydown', this.keydownListener);
+
+    this.keyupListener = this.handleKeyUp.bind(this);
+    this.container.addEventListener('keyup', this.keyupListener);
 
     this.pasteListener = this.handlePaste.bind(this);
     this.container.addEventListener('paste', this.pasteListener);
@@ -392,21 +403,10 @@ export class InputHandler {
       }
     }
 
-    // Ctrl+V and Cmd+V: forward the key, then let the browser's native paste
-    // event fire (no preventDefault). An application that reads the clipboard
-    // itself, for an image paste, waits for 0x16 in its input; text paste
-    // still arrives through handlePaste afterwards.
+    // Ctrl+V and Cmd+V: let the browser's native paste event fire (no preventDefault).
+    // Do not emit 0x16 here, because in a cooked shell 0x16 is quoted-insert and
+    // eats the ESC of the bracketed paste wrapper (\x1b[200~) that follows in handlePaste.
     if ((event.ctrlKey || event.metaKey) && event.code === 'KeyV') {
-      const encoded = this.encoder.encode({
-        action: KeyAction.PRESS,
-        key: Key.V,
-        mods: Mods.CTRL,
-        utf8: 'v',
-      });
-      const data = new TextDecoder().decode(encoded);
-      if (data.length > 0) {
-        this.onDataCallback(data);
-      }
       return;
     }
 
@@ -422,9 +422,11 @@ export class InputHandler {
       return;
     }
 
-    // For printable characters without modifiers, send the character directly
-    // This handles: a-z, A-Z (with shift), 0-9, punctuation, etc.
-    if (this.isPrintableCharacter(event)) {
+    const { kittyFlags } = this.syncEncoderOptions();
+
+    // For printable characters without modifiers (and when Kitty keyboard protocol is off),
+    // send the character directly. This handles: a-z, A-Z (with shift), 0-9, punctuation, etc.
+    if (kittyFlags === 0 && this.isPrintableCharacter(event)) {
       event.preventDefault();
       this.onDataCallback(event.key);
       this.recordKeyDownData(event.key);
@@ -434,16 +436,25 @@ export class InputHandler {
     // Map the physical key code
     const key = this.mapKeyCode(event.code);
     if (key === null) {
-      // Unknown key - ignore it
+      // If unmapped key is a printable character (e.g. non-US layout), emit directly
+      if (this.isPrintableCharacter(event)) {
+        event.preventDefault();
+        this.onDataCallback(event.key);
+        this.recordKeyDownData(event.key);
+      }
       return;
     }
 
     // Extract modifiers
     const mods = this.extractModifiers(event);
 
-    // Handle simple special keys that produce standard sequences
-    if (mods === Mods.NONE || mods === Mods.SHIFT) {
+    // Handle simple unmodified special keys (plus Shift+Tab) when Kitty protocol is inactive.
+    // All other shifted keys (Shift+F1..F12, Shift+Home/End/Insert/Delete/PageUp/PageDown, etc.)
+    // must go through KeyEncoder so modifier parameters are preserved.
+    if (kittyFlags === 0 && (mods === Mods.NONE || (key === Key.TAB && mods === Mods.SHIFT))) {
       let simpleOutput: string | null = null;
+      const appCursorMode =
+        this.getModeCallback?.(1) ?? this.getTerminalCallback?.()?.getMode(1, false) ?? false;
 
       switch (key) {
         case Key.ENTER:
@@ -465,10 +476,10 @@ export class InputHandler {
         // Arrow keys are handled by the encoder (respects application cursor mode)
         // Navigation keys
         case Key.HOME:
-          simpleOutput = '\x1B[H';
+          simpleOutput = appCursorMode ? '\x1BOH' : '\x1B[H';
           break;
         case Key.END:
-          simpleOutput = '\x1B[F';
+          simpleOutput = appCursorMode ? '\x1BOF' : '\x1B[F';
           break;
         case Key.INSERT:
           simpleOutput = '\x1B[2~';
@@ -529,18 +540,11 @@ export class InputHandler {
       }
     }
 
-    // Determine action (we only care about PRESS for now, not RELEASE or REPEAT)
-    const action = KeyAction.PRESS;
+    // Determine action (PRESS or REPEAT)
+    const action = event.repeat ? KeyAction.REPEAT : KeyAction.PRESS;
 
-    // For non-printable keys or keys with modifiers, encode using Ghostty
+    // For non-printable keys, keys with modifiers, or Kitty protocol keys, encode using Ghostty
     try {
-      // Sync encoder options with terminal mode state
-      // Mode 1 (DECCKM) controls whether arrow keys send CSI or SS3 sequences
-      if (this.getModeCallback) {
-        const appCursorMode = this.getModeCallback(1);
-        this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, appCursorMode);
-      }
-
       // For letter/number keys, even with modifiers, pass the base character
       // This helps the encoder produce correct control sequences (e.g., Ctrl+A = 0x01)
       // For special keys (Enter, Arrow keys, etc.), don't pass utf8
@@ -576,6 +580,62 @@ export class InputHandler {
   }
 
   /**
+   * Synchronize KeyEncoder options with the live terminal state
+   */
+  private syncEncoderOptions(): { kittyFlags: number } {
+    const term = this.getTerminalCallback?.();
+    if (term) {
+      this.encoder.setOptionsFromTerminal(term.getHandle());
+      return { kittyFlags: term.getKittyKeyboardFlags() };
+    }
+    if (this.getModeCallback) {
+      const appCursorMode = this.getModeCallback(1);
+      this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, appCursorMode);
+    }
+    return { kittyFlags: 0 };
+  }
+
+  /**
+   * Handle keyup event (for Kitty keyboard protocol event reporting)
+   */
+  private handleKeyUp(event: KeyboardEvent): void {
+    if (this.isDisposed) return;
+    if (this.isComposing || event.isComposing || event.keyCode === 229) {
+      return;
+    }
+
+    const { kittyFlags } = this.syncEncoderOptions();
+    // Kitty keyboard protocol bit 1 (value 2) = REPORT_EVENTS
+    if ((kittyFlags & 2) === 0) {
+      return;
+    }
+
+    const key = this.mapKeyCode(event.code);
+    if (key === null) return;
+
+    const mods = this.extractModifiers(event);
+    const utf8 =
+      event.key.length === 1 && event.key.charCodeAt(0) < 128 ? event.key.toLowerCase() : undefined;
+
+    try {
+      const encoded = this.encoder.encode({
+        action: KeyAction.RELEASE,
+        key,
+        mods,
+        utf8,
+      });
+      const data = new TextDecoder().decode(encoded);
+      if (data.length > 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.onDataCallback(data);
+      }
+    } catch (error) {
+      console.warn('Failed to encode key release:', event.code, error);
+    }
+  }
+
+  /**
    * Handle paste event from clipboard
    * @param event - ClipboardEvent
    */
@@ -596,7 +656,17 @@ export class InputHandler {
     // Get text from clipboard
     const text = clipboardData.getData('text/plain');
     if (!text) {
-      console.warn('No text in clipboard');
+      // Emit 0x16 only when clipboard has non-text content (e.g. an image)
+      // and an application is expected to read the clipboard itself.
+      if (
+        clipboardData.types &&
+        clipboardData.types.length > 0 &&
+        !clipboardData.types.includes('text/plain')
+      ) {
+        this.onDataCallback('\x16');
+      } else {
+        console.warn('No text in clipboard');
+      }
       return;
     }
 
@@ -852,6 +922,9 @@ export class InputHandler {
 
     // Track pressed buttons for motion events
     this.mouseButtonsPressed |= 1 << button;
+    this.lastMouseMoveCol = -1;
+    this.lastMouseMoveRow = -1;
+    this.lastMouseMoveButton = -1;
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
 
@@ -874,6 +947,9 @@ export class InputHandler {
 
     // Clear pressed button
     this.mouseButtonsPressed &= ~(1 << button);
+    this.lastMouseMoveCol = -1;
+    this.lastMouseMoveRow = -1;
+    this.lastMouseMoveButton = -1;
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
   }
@@ -898,13 +974,26 @@ export class InputHandler {
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
-    // Determine which button to report (or 32 for motion with no button)
+    // Determine which button to report (35 = 32 + 3 for motion with no button)
     let button = 32; // Motion flag
     if (this.mouseButtonsPressed & 1)
       button += 0; // Left
     else if (this.mouseButtonsPressed & 2)
       button += 1; // Middle
-    else if (this.mouseButtonsPressed & 4) button += 2; // Right
+    else if (this.mouseButtonsPressed & 4)
+      button += 2; // Right
+    else button += 3; // No button pressed (hover in mode 1003)
+
+    if (
+      cell.col === this.lastMouseMoveCol &&
+      cell.row === this.lastMouseMoveRow &&
+      button === this.lastMouseMoveButton
+    ) {
+      return;
+    }
+    this.lastMouseMoveCol = cell.col;
+    this.lastMouseMoveRow = cell.row;
+    this.lastMouseMoveButton = button;
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
   }
@@ -935,7 +1024,13 @@ export class InputHandler {
     const hasBracketedPaste = this.getModeCallback?.(2004) ?? false;
 
     if (hasBracketedPaste) {
-      this.onDataCallback('\x1b[200~' + text + '\x1b[201~');
+      // Strip bracketed paste end/start markers and dangerous control chars
+      // so clipboard contents cannot prematurely terminate bracketed paste mode.
+      const sanitized = text
+        .replace(/\x1b\[20[01]~/g, '')
+        .replace(/\u009b20[01]~/g, '')
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u009b]/g, '');
+      this.onDataCallback('\x1b[200~' + sanitized + '\x1b[201~');
     } else {
       this.onDataCallback(text);
     }
@@ -1061,6 +1156,11 @@ export class InputHandler {
     if (this.keydownListener) {
       this.container.removeEventListener('keydown', this.keydownListener);
       this.keydownListener = null;
+    }
+
+    if (this.keyupListener) {
+      this.container.removeEventListener('keyup', this.keyupListener);
+      this.keyupListener = null;
     }
 
     if (this.keypressListener) {

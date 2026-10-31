@@ -57,7 +57,7 @@ export class Terminal implements ITerminalCore {
   public textarea?: HTMLTextAreaElement;
 
   // Buffer API (xterm.js compatibility)
-  public readonly buffer: IBufferNamespace;
+  public readonly buffer: BufferNamespace;
 
   // Unicode API (xterm.js compatibility)
   public readonly unicode: IUnicodeVersionProvider = {
@@ -138,6 +138,7 @@ export class Terminal implements ITerminalCore {
 
   // Lifecycle state
   private isOpen = false;
+  private isOpening = false;
   private isDisposed = false;
   private isSwapping = false;
   private animationFrameId?: number;
@@ -162,8 +163,15 @@ export class Terminal implements ITerminalCore {
   private scrollAnimationStartY?: number;
   private scrollAnimationFrame?: number;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
-  private lastCursorY: number = 0; // Track cursor position for onCursorMove
+  private lastCursorX: number = 0; // Track cursor X position for onCursorMove
+  private lastCursorY: number = 0; // Track cursor Y position for onCursorMove
   private lastCursorStyle?: 'block' | 'underline' | 'bar'; // Follow DECSCUSR from the application
+  private altWheelRemainder: number = 0; // Fractional wheel accumulator for alternate screen
+  private readonly handleParentBeforeInput = (e: Event): void => {
+    if (e.target === this.element) {
+      e.preventDefault();
+    }
+  };
 
   // Scrollbar interaction state
   private isDraggingScrollbar: boolean = false;
@@ -330,10 +338,11 @@ export class Terminal implements ITerminalCore {
 
   /**
    * Parse a CSS color string to 0xRRGGBB format.
-   * Returns 0 if the color is undefined or invalid.
+   * Returns undefined if the color is undefined or invalid so pure black (#000000 = 0)
+   * is distinguished from "unset".
    */
-  private parseColorToHex(color?: string): number {
-    if (!color) return 0;
+  private parseColorToHex(color?: string): number | undefined {
+    if (!color) return undefined;
 
     // Handle hex colors (#RGB, #RRGGBB)
     if (color.startsWith('#')) {
@@ -341,8 +350,9 @@ export class Terminal implements ITerminalCore {
       if (hex.length === 3) {
         hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
       }
+      if (!/^[0-9a-fA-F]{6}$/.test(hex)) return undefined;
       const value = Number.parseInt(hex, 16);
-      return Number.isNaN(value) ? 0 : value;
+      return Number.isNaN(value) ? undefined : value;
     }
 
     // Handle rgb(r, g, b) format
@@ -354,7 +364,7 @@ export class Terminal implements ITerminalCore {
       return (r << 16) | (g << 8) | b;
     }
 
-    return 0;
+    return undefined;
   }
 
   /**
@@ -372,7 +382,7 @@ export class Terminal implements ITerminalCore {
     // Build palette array from theme colors
     // Order: black, red, green, yellow, blue, magenta, cyan, white,
     //        brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite
-    const palette: number[] = [
+    const palette: (number | undefined)[] = [
       this.parseColorToHex(theme?.black),
       this.parseColorToHex(theme?.red),
       this.parseColorToHex(theme?.green),
@@ -400,6 +410,40 @@ export class Terminal implements ITerminalCore {
     };
   }
 
+  private wireWasmCallbacks(): void {
+    if (!this.wasmTerm) return;
+    this.wasmTerm.setBellHandler(() => {
+      this.bellEmitter.fire();
+    });
+    this.wasmTerm.setTitleChangeHandler((title) => {
+      if (title !== this.currentTitle) {
+        this.currentTitle = title;
+        this.titleChangeEmitter.fire(title);
+      }
+    });
+    this.wasmTerm.setRenderHoldHandler((held) => {
+      this.onRenderHoldChanged(held);
+    });
+    this.syncProgramStatusHandler();
+  }
+
+  private onRenderHoldChanged(held: boolean): void {
+    if (!held) {
+      if (this.syncOutputTimer !== undefined) clearTimeout(this.syncOutputTimer);
+      this.syncOutputTimer = undefined;
+      this.syncOutputDeadline = undefined;
+      return;
+    }
+    if (this.syncOutputDeadline === undefined) {
+      this.syncOutputDeadline = Date.now() + 1000;
+      this.syncOutputTimer = setTimeout(() => {
+        this.syncOutputTimer = undefined;
+        this.wasmTerm?.releaseRenderHold();
+        this.requestRender();
+      }, 1000);
+    }
+  }
+
   // ==========================================================================
   // Lifecycle Methods
   // ==========================================================================
@@ -420,7 +464,7 @@ export class Terminal implements ITerminalCore {
    * before the first await and still throws synchronously.
    */
   public async open(parent?: HTMLElement): Promise<void> {
-    if (this.isOpen) {
+    if (this.isOpen || this.isOpening) {
       throw new Error('Terminal is already open');
     }
     if (this.isDisposed) {
@@ -430,6 +474,7 @@ export class Terminal implements ITerminalCore {
       throw new Error('open() requires a parent HTMLElement');
     }
 
+    this.isOpening = true;
     // Store parent element
     this.element = parent;
 
@@ -445,11 +490,7 @@ export class Terminal implements ITerminalCore {
       // this as an input element and don't intercept keyboard events.
       parent.setAttribute('contenteditable', 'true');
       // Prevent actual content editing - we handle input ourselves
-      parent.addEventListener('beforeinput', (e) => {
-        if (e.target === parent) {
-          e.preventDefault();
-        }
-      });
+      parent.addEventListener('beforeinput', this.handleParentBeforeInput);
 
       // Add accessibility attributes for screen readers and extensions
       parent.setAttribute('role', 'textbox');
@@ -459,7 +500,7 @@ export class Terminal implements ITerminalCore {
       // Create WASM terminal with current dimensions and config
       const config = this.buildWasmConfig();
       this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
-      this.syncProgramStatusHandler();
+      this.wireWasmCallbacks();
 
       // Create canvas element
       this.canvas = document.createElement('canvas');
@@ -507,13 +548,18 @@ export class Terminal implements ITerminalCore {
       this.scrollbarOverlay = new ScrollbarOverlay(scrollbarCanvas, window.devicePixelRatio || 1);
 
       // Resolve the renderer (canvas2d or webgpu, with auto-fallback).
-      this.renderer = await pickRenderer(this.options.renderer ?? 'auto', this.canvas, {
+      const renderer = await pickRenderer(this.options.renderer ?? 'auto', this.canvas, {
         fontSize: this.options.fontSize,
         fontFamily: this.options.fontFamily,
         cursorStyle: this.options.cursorStyle,
         cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
       });
+      if (this.isDisposed) {
+        renderer.destroy();
+        throw new Error('Terminal has been disposed');
+      }
+      this.renderer = renderer;
 
       // Wire up renderer-dependent components (selection, links, listeners).
       // _finishOpen() sets `this.isOpen = true` once all wiring is complete.
@@ -525,6 +571,8 @@ export class Terminal implements ITerminalCore {
         `Failed to open terminal: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error }
       );
+    } finally {
+      this.isOpening = false;
     }
   }
 
@@ -604,7 +652,8 @@ export class Terminal implements ITerminalCore {
           return this.copySelection();
         },
         this.textarea!,
-        mouseConfig
+        mouseConfig,
+        () => this.wasmTerm
       );
 
       // Create selection manager (pass textarea for context menu positioning)
@@ -705,8 +754,9 @@ export class Terminal implements ITerminalCore {
           this.attachCanvasFocusListeners(this.canvas, this.textarea);
 
           // Resolve the new renderer; fall back to canvas2d on failure.
+          let newRenderer: Renderer;
           try {
-            this.renderer = await pickRenderer(target, this.canvas, {
+            newRenderer = await pickRenderer(target, this.canvas, {
               fontSize: this.options.fontSize,
               fontFamily: this.options.fontFamily,
               cursorStyle: this.options.cursorStyle,
@@ -716,7 +766,7 @@ export class Terminal implements ITerminalCore {
           } catch (e) {
             // If the requested target also fails, drop straight to Canvas2D.
             console.warn(`[ntwebterm] ${target} fallback failed; using canvas2d:`, e);
-            this.renderer = await pickRenderer('canvas2d', this.canvas, {
+            newRenderer = await pickRenderer('canvas2d', this.canvas, {
               fontSize: this.options.fontSize,
               fontFamily: this.options.fontFamily,
               cursorStyle: this.options.cursorStyle,
@@ -724,6 +774,11 @@ export class Terminal implements ITerminalCore {
               theme: this.options.theme,
             });
           }
+          if (this.isDisposed || !this.canvas || !this.textarea || !this.wasmTerm) {
+            newRenderer.destroy();
+            return;
+          }
+          this.renderer = newRenderer;
 
           this.renderer.resize(this.cols, this.rows);
           this.renderer.setOnRequestRender(() => this.requestRender());
@@ -803,35 +858,45 @@ export class Terminal implements ITerminalCore {
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
 
+    const prevScrollback = this.wasmTerm!.getScrollbackLength();
+    const wasAlternate = this.wasmTerm!.isAlternateScreen();
+
     // Write directly to WASM terminal (handles VT parsing internally)
     this.wasmTerm!.write(data);
     if (this.isDisposed) return;
+
+    const isAlternate = this.wasmTerm!.isAlternateScreen();
+    if (isAlternate !== wasAlternate) {
+      this.altWheelRemainder = 0;
+      this.buffer._fireBufferChange(this.buffer.active);
+    }
+
     this.holdSynchronizedOutput();
 
     // Process any responses generated by the terminal (e.g., DSR cursor position)
     // These need to be sent back to the PTY via onData
     this.processTerminalResponses();
 
-    // Check for bell character (BEL, \x07)
-    // WASM doesn't expose bell events, so we detect it in the data stream
-    if (typeof data === 'string' && data.includes('\x07')) {
-      this.bellEmitter.fire();
-    } else if (data instanceof Uint8Array && data.includes(0x07)) {
-      this.bellEmitter.fire();
-    }
-
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
-    // Phase 2: Auto-scroll to bottom on new output (xterm.js behavior)
+    // Keep the viewport parked when the user is reading scrollback history;
+    // compensate for newly scrolled-off rows so the viewed lines stay in place.
     if (this.viewportY !== 0) {
-      this.scrollToBottom();
-    }
-
-    // Check for title changes (OSC 0, 1, 2 sequences)
-    // This is a simplified implementation - Ghostty WASM may provide this
-    if (typeof data === 'string' && data.includes('\x1b]')) {
-      this.checkForTitleChange(data);
+      if (isAlternate) {
+        this.viewportY = 0;
+        this.targetViewportY = 0;
+      } else {
+        const newScrollback = this.wasmTerm!.getScrollbackLength();
+        const addedScrollback = Math.max(0, newScrollback - prevScrollback);
+        if (addedScrollback > 0) {
+          this.viewportY = Math.min(newScrollback, this.viewportY + addedScrollback);
+          this.targetViewportY = Math.min(newScrollback, this.targetViewportY + addedScrollback);
+        } else if (this.viewportY > newScrollback) {
+          this.viewportY = newScrollback;
+          this.targetViewportY = Math.min(newScrollback, this.targetViewportY);
+        }
+      }
     }
 
     // Call callback if provided
@@ -886,8 +951,12 @@ export class Terminal implements ITerminalCore {
 
     // Check if terminal has bracketed paste mode enabled
     if (this.wasmTerm!.hasBracketedPaste()) {
+      const sanitized = data
+        .replace(/\x1b\[20[01]~/g, '')
+        .replace(/\u009b20[01]~/g, '')
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u009b]/g, '');
       // Wrap with bracketed paste sequences (DEC mode 2004)
-      this.dataEmitter.fire('\x1b[200~' + data + '\x1b[201~');
+      this.dataEmitter.fire('\x1b[200~' + sanitized + '\x1b[201~');
     } else {
       // Send data directly
       this.dataEmitter.fire(data);
@@ -942,6 +1011,21 @@ export class Terminal implements ITerminalCore {
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
 
+      // Clamp viewportY to the new scrollback length after reflow
+      const maxScroll = this.getScrollbackLength();
+      if (this.viewportY > maxScroll) {
+        this.viewportY = maxScroll;
+      }
+      if (this.targetViewportY > maxScroll) {
+        this.targetViewportY = maxScroll;
+        if (this.scrollAnimationFrame) {
+          cancelAnimationFrame(this.scrollAnimationFrame);
+          this.scrollAnimationFrame = undefined;
+          this.scrollAnimationStartTime = undefined;
+          this.scrollAnimationStartY = undefined;
+        }
+      }
+
       // Resize renderer (it manages canvas device-pixel + CSS sizing,
       // including DPR scaling — don't overwrite afterwards).
       this.renderer!.resize(cols, rows);
@@ -990,18 +1074,33 @@ export class Terminal implements ITerminalCore {
   reset(): void {
     this.assertOpen();
 
-    // Free old WASM terminal and create new one
-    if (this.wasmTerm) {
-      this.wasmTerm.free();
-    }
-    const config = this.buildWasmConfig();
-    this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
-    this.syncProgramStatusHandler();
-
-    // The fresh WASM terminal starts with zero cell pixel dims, so CSI
-    // 14/16/18 t and kitty graphics sizing would silently report zeros
-    // until a font/resize event re-pushed them. Reapply now.
+    const wasAlternate = this.wasmTerm!.isAlternateScreen();
+    this.wasmTerm!.reset();
     this.updateWasmPixelSize();
+
+    if (this.syncOutputTimer !== undefined) clearTimeout(this.syncOutputTimer);
+    this.syncOutputTimer = undefined;
+    this.syncOutputDeadline = undefined;
+
+    if (this.scrollAnimationFrame) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+      this.scrollAnimationStartTime = undefined;
+      this.scrollAnimationStartY = undefined;
+    }
+    this.viewportY = 0;
+    this.targetViewportY = 0;
+    this.altWheelRemainder = 0;
+    this.lastCursorX = 0;
+    this.lastCursorY = 0;
+    this.lastCursorStyle = undefined;
+
+    this.selectionManager?.clearSelection();
+    this.linkDetector?.invalidateCache();
+
+    if (wasAlternate) {
+      this.buffer._fireBufferChange(this.buffer.active);
+    }
 
     // Clear renderer (force full repaint on next render)
     this.renderer!.invalidate();
@@ -1501,22 +1600,35 @@ export class Terminal implements ITerminalCore {
 
   // DEC mode 2026 brackets an atomic screen update. VT parsing continues
   // while it is held, but none of our paint paths may expose that partial
-  // state. A bounded hold also recovers from a missing closing marker.
+  // state. When RENDER_HOLD captured a completed pre-hold snapshot right at
+  // the BSU boundary, allow painting that snapshot once before holding.
   private holdSynchronizedOutput(): boolean {
-    if (!this.wasmTerm?.getMode(2026)) {
+    if (!this.wasmTerm) return false;
+    if (this.wasmTerm.hasPendingHoldSnapshot()) {
+      return false;
+    }
+    if (!this.wasmTerm.isRenderHeld() && !this.wasmTerm.getMode(2026)) {
       if (this.syncOutputTimer !== undefined) clearTimeout(this.syncOutputTimer);
       this.syncOutputTimer = undefined;
       this.syncOutputDeadline = undefined;
+      return false;
+    }
+    if (!this.wasmTerm.isRenderHeld()) {
       return false;
     }
     if (this.syncOutputDeadline === undefined) {
       this.syncOutputDeadline = Date.now() + 1000;
       this.syncOutputTimer = setTimeout(() => {
         this.syncOutputTimer = undefined;
+        this.wasmTerm?.releaseRenderHold();
         this.requestRender();
       }, 1000);
     }
-    return Date.now() < this.syncOutputDeadline;
+    if (Date.now() >= this.syncOutputDeadline) {
+      this.wasmTerm.releaseRenderHold();
+      return false;
+    }
+    return true;
   }
 
   private imageAnimationTimer?: ReturnType<typeof setTimeout>;
@@ -1558,13 +1670,14 @@ export class Terminal implements ITerminalCore {
     });
 
     // Check for cursor movement (Phase 2: onCursorMove event)
-    // Note: getCursor() reads from already-updated render state (from render() above)
-    const cursor = this.wasmTerm!.getCursor();
-    if (cursor.y !== this.lastCursorY) {
-      this.lastCursorY = cursor.y;
+    const logicalCursor = this.wasmTerm!.getLogicalCursor();
+    if (logicalCursor.x !== this.lastCursorX || logicalCursor.y !== this.lastCursorY) {
+      this.lastCursorX = logicalCursor.x;
+      this.lastCursorY = logicalCursor.y;
       this.cursorMoveEmitter.fire();
     }
 
+    const cursor = this.wasmTerm!.getCursor();
     // DECSCUSR (ESC [ Ps SP q): vim and shells switch the cursor shape at
     // runtime. The first frame records the WASM default without applying it,
     // so the configured cursorStyle stays until the application asks.
@@ -1693,7 +1806,8 @@ export class Terminal implements ITerminalCore {
 
     // Remove event listeners
     if (this.element) {
-      this.element.removeEventListener('wheel', this.handleWheel);
+      this.element.removeEventListener('beforeinput', this.handleParentBeforeInput);
+      this.element.removeEventListener('wheel', this.handleWheel, { capture: true });
       this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
@@ -2081,18 +2195,40 @@ export class Terminal implements ITerminalCore {
     const isAltScreen = this.wasmTerm?.isAlternateScreen() ?? false;
 
     if (isAltScreen) {
-      // Alternate screen: send arrow keys to the application
-      // Applications like vim handle scrolling internally
-      // Standard: ~3 arrow presses per wheel "click"
-      const direction = e.deltaY > 0 ? 'down' : 'up';
-      const count = Math.min(Math.abs(Math.round(e.deltaY / 33)), 5); // Cap at 5
+      // Alternate screen: send arrow keys to the application.
+      // Accumulate sub-line trackpad deltas so small events are not dropped,
+      // and honor DEC mode 1 (DECCKM application cursor keys).
+      let deltaTicks: number;
+      if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+        deltaTicks = e.deltaY;
+      } else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+        deltaTicks = e.deltaY * this.rows;
+      } else {
+        deltaTicks = e.deltaY / 33;
+      }
+
+      if (deltaTicks === 0) return;
+
+      if (
+        (deltaTicks > 0 && this.altWheelRemainder < 0) ||
+        (deltaTicks < 0 && this.altWheelRemainder > 0)
+      ) {
+        this.altWheelRemainder = 0;
+      }
+
+      this.altWheelRemainder += deltaTicks;
+      const wholeTicks = Math.trunc(this.altWheelRemainder);
+      if (wholeTicks === 0) return;
+      this.altWheelRemainder -= wholeTicks;
+
+      const direction = wholeTicks > 0 ? 'down' : 'up';
+      const count = Math.min(Math.abs(wholeTicks), 5); // Cap at 5
+      const appCursor = this.wasmTerm?.getMode(1, false) ?? false;
+      const seq =
+        direction === 'up' ? (appCursor ? '\x1BOA' : '\x1B[A') : appCursor ? '\x1BOB' : '\x1B[B';
 
       for (let i = 0; i < count; i++) {
-        if (direction === 'up') {
-          this.dataEmitter.fire('\x1B[A'); // Up arrow
-        } else {
-          this.dataEmitter.fire('\x1B[B'); // Down arrow
-        }
+        this.dataEmitter.fire(seq);
       }
     } else {
       // Normal screen: scroll viewport through history with smooth scrolling
@@ -2371,31 +2507,6 @@ export class Terminal implements ITerminalCore {
       // Send response back to the PTY via onData
       // This is the same path as user keyboard input
       this.dataEmitter.fire(response);
-    }
-  }
-
-  /**
-   * Check for title changes in written data (OSC sequences)
-   * Simplified implementation - looks for OSC 0, 1, 2
-   */
-  private checkForTitleChange(data: string): void {
-    // OSC sequences: ESC ] Ps ; Pt BEL or ESC ] Ps ; Pt ST
-    // OSC 0 = icon + title, OSC 1 = icon, OSC 2 = title
-    const oscRegex = /\x1b\]([012]);([^\x07\x1b]*?)(?:\x07|\x1b\\)/g;
-    let match: RegExpExecArray | null = null;
-
-    // biome-ignore lint/suspicious/noAssignInExpressions: Standard regex pattern
-    while ((match = oscRegex.exec(data)) !== null) {
-      const ps = match[1];
-      const pt = match[2];
-
-      // OSC 0 and OSC 2 set the title
-      if (ps === '0' || ps === '2') {
-        if (pt !== this.currentTitle) {
-          this.currentTitle = pt;
-          this.titleChangeEmitter.fire(pt);
-        }
-      }
     }
   }
 

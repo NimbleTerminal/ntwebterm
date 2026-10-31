@@ -1160,7 +1160,7 @@ describe('InputHandler', () => {
       expect(dataReceived.length).toBe(0);
     });
 
-    test('allows Ctrl+V to trigger paste', () => {
+    test('allows Ctrl+V to trigger paste without emitting 0x16 on keydown', () => {
       const handler = new InputHandler(
         ghostty,
         container as any,
@@ -1170,16 +1170,16 @@ describe('InputHandler', () => {
         }
       );
 
-      // Ctrl+V is forwarded as 0x16, for an application that reads the
-      // clipboard itself, and the browser's paste event still fires for text.
+      // Ctrl+V lets the browser's paste event fire without sending 0x16 (LNEXT)
+      // ahead of \x1b[200~.
       const event = createKeyEvent('KeyV', 'v', { ctrl: true });
       simulateKey(container, event);
 
-      expect(dataReceived).toEqual(['\x16']);
+      expect(dataReceived).toEqual([]);
       expect(event.preventDefault).not.toHaveBeenCalled();
     });
 
-    test('allows Cmd+V to trigger paste', () => {
+    test('allows Cmd+V to trigger paste without emitting 0x16 on keydown', () => {
       const handler = new InputHandler(
         ghostty,
         container as any,
@@ -1189,12 +1189,147 @@ describe('InputHandler', () => {
         }
       );
 
-      // Cmd+V is forwarded as 0x16 too, and the paste event still fires.
       const event = createKeyEvent('KeyV', 'v', { meta: true });
       simulateKey(container, event);
 
-      expect(dataReceived).toEqual(['\x16']);
+      expect(dataReceived).toEqual([]);
       expect(event.preventDefault).not.toHaveBeenCalled();
+    });
+
+    test('emits 0x16 on paste when clipboard has non-text content (e.g. image)', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      const pasteEvent = new Event('paste') as any;
+      pasteEvent.clipboardData = {
+        getData: () => '',
+        types: ['image/png'],
+        items: [{ type: 'image/png' }],
+      };
+      pasteEvent.preventDefault = mock(() => {});
+
+      container.dispatchEvent(pasteEvent);
+
+      expect(dataReceived).toEqual(['\x16']);
+      expect(pasteEvent.preventDefault).toHaveBeenCalled();
+      handler.dispose();
+    });
+
+    test('sanitizes bracketed paste payload containing ESC [ 201 ~', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {},
+        undefined,
+        undefined,
+        () => true
+      );
+
+      const pasteEvent = createClipboardEvent('ok\x1b[201~echo pwned\x9b201~');
+      container.dispatchEvent(pasteEvent);
+
+      expect(dataReceived.length).toBe(1);
+      expect(dataReceived[0]).toBe('\x1b[200~okecho pwned\x1b[201~');
+      handler.dispose();
+    });
+  });
+
+  describe('Shifted special keys and encoder options', () => {
+    test('encodes Shift+F5 and Shift+Home with Shift modifier', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {}
+      );
+
+      simulateKey(container, createKeyEvent('F5', 'F5', { shift: true }));
+      simulateKey(container, createKeyEvent('Home', 'Home', { shift: true }));
+
+      expect(dataReceived[0]).toBe('\x1b[15;2~');
+      expect(dataReceived[1]).toBe('\x1b[1;2H');
+      handler.dispose();
+    });
+
+    test('syncs Kitty keyboard flags and encodes key repeat and keyup when REPORT_EVENTS is active', () => {
+      const wasmTerm = ghostty.createTerminal(80, 24);
+      // Enable Kitty keyboard flags: DISAMBIGUATE (1) | REPORT_EVENTS (2) | REPORT_ALL (8) = 11
+      wasmTerm.write('\x1b[>11u');
+
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => wasmTerm
+      );
+
+      const repeatEv = createKeyEvent('KeyA', 'a');
+      Object.defineProperty(repeatEv, 'repeat', { value: true });
+      simulateKey(container, repeatEv);
+
+      const upEv = new KeyboardEvent('keyup', {
+        code: 'KeyA',
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      container.dispatchEvent(upEv);
+
+      expect(dataReceived.some((d) => d.includes(':2u'))).toBe(true);
+      expect(dataReceived.some((d) => d.includes(':3u'))).toBe(true);
+
+      handler.dispose();
+      wasmTerm.free();
+    });
+
+    test('any-event mouse tracking reports button 35 on hover and deduplicates same-cell motion', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {},
+        undefined,
+        undefined,
+        (mode) => mode === 1003,
+        undefined,
+        undefined,
+        {
+          hasMouseTracking: () => true,
+          getMouseTrackingMode: () => 'any',
+          hasSgrMouseMode: () => true,
+          getCellDimensions: () => ({ width: 10, height: 20 }),
+          getCanvasOffset: () => ({ left: 0, top: 0 }),
+        }
+      );
+
+      container.dispatchEvent(
+        new MouseEvent('mousemove', { clientX: 15, clientY: 25, buttons: 0 })
+      );
+      // Second move within the same cell (col 2, row 2) should be deduplicated
+      container.dispatchEvent(
+        new MouseEvent('mousemove', { clientX: 16, clientY: 26, buttons: 0 })
+      );
+      // Move to next cell (col 3, row 2) should emit
+      container.dispatchEvent(
+        new MouseEvent('mousemove', { clientX: 25, clientY: 26, buttons: 0 })
+      );
+
+      expect(dataReceived).toEqual(['\x1b[<35;2;2M', '\x1b[<35;3;2M']);
+      handler.dispose();
     });
   });
 

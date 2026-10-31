@@ -9,6 +9,7 @@
  */
 
 import type { IBufferRange, ILink, ILinkProvider } from '../types';
+import { isSafeExternalUrl } from './osc8-link-provider';
 
 /**
  * URL Regex Provider
@@ -72,18 +73,19 @@ export class UrlRegexProvider implements ILinkProvider {
         endX = startX + url.length - 1;
       }
 
-      // Skip if URL is too short (e.g., just "http://")
-      if (url.length > 8) {
+      // Skip if URL is too short (e.g., just "http://") or fails URL scheme validation
+      if (url.length > 8 && isSafeExternalUrl(url)) {
+        const safeUrl = url;
         links.push({
-          text: url,
+          text: safeUrl,
           range: {
             start: { x: startX, y },
             end: { x: endX, y },
           },
           activate: (event) => {
             // Open link if Ctrl/Cmd is pressed
-            if (event.ctrlKey || event.metaKey) {
-              window.open(url, '_blank', 'noopener,noreferrer');
+            if ((event.ctrlKey || event.metaKey) && isSafeExternalUrl(safeUrl)) {
+              window.open(safeUrl, '_blank', 'noopener,noreferrer');
             }
           },
         });

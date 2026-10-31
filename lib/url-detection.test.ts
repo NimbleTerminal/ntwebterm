@@ -184,4 +184,15 @@ describe('URL Detection', () => {
     expect(links?.length).toBe(1);
     expect(links?.[0].text).toContain('magnet:?xt=urn:btih:abc123');
   });
+
+  test('isSafeExternalUrl allows safe schemes and blocks javascript: and data: URIs', async () => {
+    const { isSafeExternalUrl } = await import('./providers/osc8-link-provider');
+    expect(isSafeExternalUrl('https://example.com/path')).toBe(true);
+    expect(isSafeExternalUrl('mailto:user@example.com')).toBe(true);
+    expect(isSafeExternalUrl('ssh://git@github.com/org/repo')).toBe(true);
+    expect(isSafeExternalUrl('javascript:alert(1)')).toBe(false);
+    expect(isSafeExternalUrl('JAVASCRIPT:alert(1)')).toBe(false);
+    expect(isSafeExternalUrl('data:text/html,<script>alert(1)</script>')).toBe(false);
+    expect(isSafeExternalUrl('file:///etc/passwd')).toBe(false);
+  });
 });
