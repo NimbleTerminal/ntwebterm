@@ -7,7 +7,7 @@
  * all three concrete backends — webgpu → webgl → canvas2d → wrap.
  */
 
-import type { RendererBackend } from './renderer-types';
+import type { Renderer, RendererBackend } from './renderer-types';
 import type { Terminal } from './terminal';
 
 declare global {
@@ -157,22 +157,39 @@ export function installRendererHud(terminal: Terminal, opts: RendererHudOptions 
 
   parent.appendChild(badge);
 
-  // rAF loop for the FPS counter — text updates once per second.
+  // Count actual renderer.render() invocations and update the badge once per
+  // second instead of running an unconditional 60 Hz requestAnimationFrame loop.
   let frames = 0;
-  let lastTick = performance.now();
-  let rafId: number | null = null;
-  const tick = () => {
-    frames += 1;
-    const now = performance.now();
-    if (now - lastTick >= 1000) {
-      const backend = terminal.renderer?.backend ?? '?';
-      badge.textContent = `${backend} ${frames} fps`;
-      frames = 0;
-      lastTick = now;
+  let wrappedRenderer: Renderer | undefined;
+  let originalRender: Renderer['render'] | undefined;
+
+  const attachRenderHook = () => {
+    const cur = terminal.renderer;
+    if (cur === wrappedRenderer) return;
+    if (wrappedRenderer && originalRender) {
+      wrappedRenderer.render = originalRender;
     }
-    rafId = requestAnimationFrame(tick);
+    wrappedRenderer = cur;
+    if (cur && typeof cur.render === 'function') {
+      originalRender = cur.render;
+      cur.render = function (...args: Parameters<Renderer['render']>) {
+        frames += 1;
+        return originalRender!.apply(this, args);
+      };
+    } else {
+      originalRender = undefined;
+    }
   };
-  rafId = requestAnimationFrame(tick);
+
+  attachRenderHook();
+  badge.textContent = `${terminal.renderer?.backend ?? '?'} 0 fps`;
+
+  const intervalId = setInterval(() => {
+    attachRenderHook();
+    const backend = terminal.renderer?.backend ?? '?';
+    badge.textContent = `${backend} ${frames} fps`;
+    frames = 0;
+  }, 1000);
 
   const cycleNow = () => {
     const next = nextInCycle(terminal.renderer?.backend, cycle);
@@ -194,7 +211,10 @@ export function installRendererHud(terminal: Terminal, opts: RendererHudOptions 
   if (bindToggleHotkey) window.addEventListener('keydown', onKeydown);
 
   return () => {
-    if (rafId !== null) cancelAnimationFrame(rafId);
+    clearInterval(intervalId);
+    if (wrappedRenderer && originalRender) {
+      wrappedRenderer.render = originalRender;
+    }
     if (clickToToggle) badge.removeEventListener('click', onClick);
     if (bindToggleHotkey) window.removeEventListener('keydown', onKeydown);
     badge.remove();

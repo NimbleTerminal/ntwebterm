@@ -1,19 +1,9 @@
 import { DEFAULT_FONT_FAMILY } from './fonts';
 /**
- * WebGPU renderer. Implementation grows across Tasks 6–16:
+ * WebGPU renderer.
  *
- * - Task 6:  device init, configure() the canvas context, empty render pass that clears to theme.background
- * - Task 7:  paletteUBO, gridUBO, cellBuffer alloc/write
- * - Task 8:  glyph atlas (raster + texture upload)
- * - Task 9:  textPass shader — ASCII glyphs with fg/bg
- * - Task 10: style flags
- * - Task 11: selection coloring
- * - Task 12: link underlines
- * - Task 13: block elements
- * - Task 14: cursor pass + blink wiring
- * - Task 15: kitty direct placements
- * - Task 16: kitty virtual placements (U+10EEEE)
- * - Phase B: migrate virtual placements to shared KittyAtlasBase; drop requiredLimits
+ * Renders the terminal grid, block elements, cursor, and Kitty graphics
+ * (direct and virtual placements) using WebGPU storage/uniform buffers.
  */
 
 import type { ImageFrame } from './render-images';
@@ -60,7 +50,7 @@ struct GridUBO {
   cursorVisible: u32,
   cursorPos: vec2<u32>,
   cursorStyle: u32,
-  _pad0: f32,
+  scrollOffsetY: f32,
   atlasSize: u32,
   _pad1: vec3<u32>,
 };
@@ -172,7 +162,7 @@ fn vsMain(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) ->
   );
   let local = corners[vid];
   let cssX = (f32(col) + local.x) * grid.cellSize.x;
-  let cssY = (f32(row) + local.y) * grid.cellSize.y;
+  let cssY = (f32(row) + local.y) * grid.cellSize.y + grid.scrollOffsetY;
   let canvasW = f32(grid.gridSize.x) * grid.cellSize.x;
   let canvasH = f32(grid.gridSize.y) * grid.cellSize.y;
   let ndcX = (cssX / canvasW) * 2.0 - 1.0;
@@ -239,7 +229,11 @@ fn fsMain(in: VOut) -> @location(0) vec4<f32> {
     let uvY = (sliceRow + in.uv.y) / gridRows;
     let rect = kittyAtlasU.rects[cell.kittyTexIndex];
     let atlasUv = mix(rect.xy, rect.zw, vec2<f32>(uvX, uvY));
-    return textureSampleLevel(kittyAtlas, kittySamp, atlasUv, 0.0);
+    let kTex = textureSampleLevel(kittyAtlas, kittySamp, atlasUv, 0.0);
+    if (textPass == 2u) {
+      return vec4<f32>(kTex.rgb * kTex.a, kTex.a);
+    }
+    return vec4<f32>(mix(bg, kTex.rgb, kTex.a), 1.0);
   }
 
   if ((flags & FLAG_IS_BLOCK_ELEMENT) != 0u) {
@@ -315,7 +309,7 @@ struct GridUBO {
   cursorVisible: u32,
   cursorPos: vec2<u32>,
   cursorStyle: u32,
-  _pad0: f32,
+  scrollOffsetY: f32,
   atlasSize: u32,
   _pad1: vec3<u32>,
 };
@@ -506,9 +500,11 @@ class GlyphAtlas extends GlyphAtlasBase {
     cellW: number,
     cellH: number,
     fontSize: number,
-    fontFamily: string
+    fontFamily: string,
+    dpr = 1
   ) {
-    super(cellW, cellH, fontSize, fontFamily);
+    const maxTexSize = device.limits?.maxTextureDimension2D ?? 8192;
+    super(cellW, cellH, fontSize, fontFamily, dpr, maxTexSize);
     this.device = device;
     this.texture = this.createBackingTexture(this.size);
   }
@@ -862,12 +858,11 @@ export class WebGPURenderer implements Renderer {
     this.device.lost.then((info) => {
       if (this.destroyed) return;
       console.error('[ntwebterm] GPUDevice lost:', info.reason, info.message);
-      // Task 17 wires this to the Terminal-level fallback.
       for (const fn of this.deviceLostListeners) fn(info);
     });
   }
 
-  /** Internal hook used by Terminal's fallback path (Task 17). */
+  /** Internal hook used by Terminal's fallback path. */
   onDeviceLost(fn: (info: GPUDeviceLostInfo) => void): void {
     this.deviceLostListeners.push(fn);
   }
@@ -887,7 +882,7 @@ export class WebGPURenderer implements Renderer {
   }
 
   private uploadGridUBO(
-    _viewportY: number,
+    viewportY: number,
     cursor: { x: number; y: number; visible: boolean }
   ): void {
     if (!this.gridUBO) return;
@@ -899,10 +894,11 @@ export class WebGPURenderer implements Renderer {
       dpr: this.dpr,
       cursorX: cursor.x,
       cursorY: cursor.y,
-      cursorVisible: cursor.visible,
+      cursorVisible: viewportY === 0 && cursor.visible,
       cursorBlinkVisible: this.cursorBlink_.isVisible(),
       cursorStyle: this.cursorStyle,
       atlasSize: this.atlas?.atlasSize ?? 1024,
+      scrollOffsetY: viewportY > 0 ? (viewportY - Math.floor(viewportY)) * this.metrics.height : 0,
     } satisfies GridUBOState);
     this.device.queue.writeBuffer(this.gridUBO, 0, u32.buffer);
   }
@@ -1000,10 +996,17 @@ export class WebGPURenderer implements Renderer {
         this.metrics.width,
         this.metrics.height,
         this.fontSize,
-        this.fontFamily
+        this.fontFamily,
+        this.dpr
       );
     } else {
-      this.atlas.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+      this.atlas.reset(
+        this.metrics.width,
+        this.metrics.height,
+        this.fontSize,
+        this.fontFamily,
+        this.dpr
+      );
     }
 
     if (!this.kittyAtlas) {
@@ -1109,17 +1112,25 @@ export class WebGPURenderer implements Renderer {
     this.kittyAtlasRects.fill(0);
     const graphics2 = buffer.getKittyGraphics?.() ?? null;
     if (graphics2 !== null && this.kittyAtlas && usedKittyImageIds.length > 0) {
-      for (let i = 0; i < usedKittyImageIds.length; i++) {
-        const id = usedKittyImageIds[i]!;
-        const pixels = buffer.getKittyImagePixels?.(graphics2, id);
-        if (!pixels) continue;
-        const entry = this.kittyAtlas.addOrUpdate(id, pixels);
-        if (!entry) continue;
-        const size = this.kittyAtlas.atlasSize;
-        this.kittyAtlasRects[i * 4 + 0] = entry.slot.u / size;
-        this.kittyAtlasRects[i * 4 + 1] = entry.slot.v / size;
-        this.kittyAtlasRects[i * 4 + 2] = (entry.slot.u + entry.slot.w) / size;
-        this.kittyAtlasRects[i * 4 + 3] = (entry.slot.v + entry.slot.h) / size;
+      const populateKittyAtlas = (): void => {
+        this.kittyAtlasRects.fill(0);
+        for (let i = 0; i < usedKittyImageIds.length; i++) {
+          const id = usedKittyImageIds[i]!;
+          const pixels = buffer.getKittyImagePixels?.(graphics2, id);
+          if (!pixels) continue;
+          const entry = this.kittyAtlas!.addOrUpdate(id, pixels);
+          if (!entry) continue;
+          const size = this.kittyAtlas!.atlasSize;
+          this.kittyAtlasRects[i * 4 + 0] = entry.slot.u / size;
+          this.kittyAtlasRects[i * 4 + 1] = entry.slot.v / size;
+          this.kittyAtlasRects[i * 4 + 2] = (entry.slot.u + entry.slot.w) / size;
+          this.kittyAtlasRects[i * 4 + 3] = (entry.slot.v + entry.slot.h) / size;
+        }
+      };
+      this.kittyAtlas.consumeDidReset();
+      populateKittyAtlas();
+      if (this.kittyAtlas.consumeDidReset()) {
+        populateKittyAtlas();
       }
     }
     if (this.kittyAtlasUBO) {
@@ -1167,6 +1178,8 @@ export class WebGPURenderer implements Renderer {
       if (this.imageFrame || graphics !== null) {
         const cssW = this.cols * this.metrics.width;
         const cssH = this.rows * this.metrics.height;
+        const scrollOffsetY =
+          viewportY > 0 ? (viewportY - Math.floor(viewportY)) * this.metrics.height : 0;
         for (const p of this.imageFrame?.placements ?? buffer.iterPlacements!(graphics!, true)) {
           if ('isVirtual' in p && p.isVirtual) continue;
           const pixels = this.imageFrame
@@ -1181,7 +1194,8 @@ export class WebGPURenderer implements Renderer {
           params[2] = p.sourceWidth;
           params[3] = p.sourceHeight;
           params[4] = p.viewportCol * this.metrics.width + ('offsetX' in p ? p.offsetX : 0);
-          params[5] = p.viewportRow * this.metrics.height + ('offsetY' in p ? p.offsetY : 0);
+          params[5] =
+            p.viewportRow * this.metrics.height + ('offsetY' in p ? p.offsetY : 0) + scrollOffsetY;
           params[6] = p.pixelWidth;
           params[7] = p.pixelHeight;
           params[8] = pixels.width;
@@ -1255,7 +1269,14 @@ export class WebGPURenderer implements Renderer {
       drawText(this.textPipeline);
       drawImages(2);
     }
-    if (this.cursorPipeline && this.cursorBindGroup) {
+    if (
+      viewportY === 0 &&
+      this.cursorPipeline &&
+      this.cursorBindGroup &&
+      cursor.visible &&
+      this.cursorBlink_.isVisible() &&
+      this.cursorStyle !== 'block'
+    ) {
       pass.setPipeline(this.cursorPipeline);
       pass.setBindGroup(0, this.cursorBindGroup);
       pass.draw(6);
@@ -1281,7 +1302,13 @@ export class WebGPURenderer implements Renderer {
   setFontSize(size: number): void {
     this.fontSize = size;
     this.metrics = this.measureFont();
-    this.atlas?.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+    this.atlas?.reset(
+      this.metrics.width,
+      this.metrics.height,
+      this.fontSize,
+      this.fontFamily,
+      this.dpr
+    );
     this.rebuildBindGroup();
     this.invalidateNext = true;
     this.onRequestRender?.();
@@ -1290,7 +1317,13 @@ export class WebGPURenderer implements Renderer {
   setFontFamily(family: string): void {
     this.fontFamily = family;
     this.metrics = this.measureFont();
-    this.atlas?.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+    this.atlas?.reset(
+      this.metrics.width,
+      this.metrics.height,
+      this.fontSize,
+      this.fontFamily,
+      this.dpr
+    );
     this.rebuildBindGroup();
     this.invalidateNext = true;
     this.onRequestRender?.();
@@ -1342,7 +1375,13 @@ export class WebGPURenderer implements Renderer {
   remeasureFont(): void {
     this.dpr = window.devicePixelRatio || 1;
     this.metrics = this.measureFont();
-    this.atlas?.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+    this.atlas?.reset(
+      this.metrics.width,
+      this.metrics.height,
+      this.fontSize,
+      this.fontFamily,
+      this.dpr
+    );
     this.invalidateNext = true;
   }
 

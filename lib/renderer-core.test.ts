@@ -862,3 +862,106 @@ describe('visualCursorX', () => {
     expect(visualCursorX(buffer, { x: 1, y: 0 }, null)).toBe(1);
   });
 });
+
+describe('Review regressions (Renderer core)', () => {
+  test('suppresses FLAG_IS_CURSOR_CELL when viewportY > 0', () => {
+    const cols = 2,
+      rows = 1;
+    const buffer = makeStubBuffer({
+      cols,
+      rows,
+      cells: [makeCell({ codepoint: 0x41 }), makeCell({ codepoint: 0x42 })],
+      placements: [],
+      cursor: { x: 0, y: 0, visible: true },
+    });
+    const sb = {
+      getScrollbackLength: () => 5,
+      getScrollbackLine: () => [makeCell({ codepoint: 0x41 }), makeCell({ codepoint: 0x42 })],
+    };
+    const cellArray = new Uint32Array(cols * rows * CELL_U32S);
+    encodeCells(cellArray, buffer, 2, sb, {
+      metrics: { width: 8, height: 16, baseline: 12 },
+      selectionManager: undefined,
+      hoveredHyperlinkId: 0,
+      hoveredLinkRange: null,
+      cursorStyle: 'block',
+      cursorBlinkVisible: true,
+      atlas: undefined,
+      kittyEnabled: false,
+      blockElementShaderEnabled: false,
+    });
+    expect(cellArray[4]! & FLAG_IS_CURSOR_CELL).toBe(0);
+  });
+
+  test('SGR blink sets FLAG_INVISIBLE during blink-off phase', () => {
+    const cols = 1,
+      rows = 1;
+    const buffer = makeStubBuffer({
+      cols,
+      rows,
+      cells: [makeCell({ codepoint: 0x41, flags: 1 << 6 /* CellFlags.BLINK */ })],
+      placements: [],
+    });
+    const cellArray = new Uint32Array(CELL_U32S);
+    encodeCells(cellArray, buffer, 0, undefined, {
+      metrics: { width: 8, height: 16, baseline: 12 },
+      selectionManager: undefined,
+      hoveredHyperlinkId: 0,
+      hoveredLinkRange: null,
+      cursorStyle: 'block',
+      cursorBlinkVisible: false,
+      atlas: undefined,
+      kittyEnabled: false,
+      blockElementShaderEnabled: false,
+    });
+    // FLAG_INVISIBLE is 1 << 6
+    expect(cellArray[4]! & (1 << 6)).toBe(1 << 6);
+  });
+
+  test('re-encodes frame when glyph atlas grows mid-frame', () => {
+    const cols = 2,
+      rows = 1;
+    const buffer = makeStubBuffer({
+      cols,
+      rows,
+      cells: [makeCell({ codepoint: 0x41 }), makeCell({ codepoint: 0x42 })],
+      placements: [],
+    });
+    let grew = false;
+    let callsForA = 0;
+    const stubAtlas = {
+      getOrRaster: (g: string) => {
+        if (g === 'A') {
+          callsForA++;
+          return { u: callsForA === 1 ? 100 : 0, v: 0, w: 8, h: 16 };
+        }
+        if (!grew) {
+          grew = true;
+          return { u: 8, v: 0, w: 8, h: 16 };
+        }
+        return { u: 8, v: 0, w: 8, h: 16 };
+      },
+      consumeDidGrow: () => {
+        if (grew) {
+          grew = false;
+          return true;
+        }
+        return false;
+      },
+    };
+    const cellArray = new Uint32Array(cols * rows * CELL_U32S);
+    encodeCells(cellArray, buffer, 0, undefined, {
+      metrics: { width: 8, height: 16, baseline: 12 },
+      selectionManager: undefined,
+      hoveredHyperlinkId: 0,
+      hoveredLinkRange: null,
+      cursorStyle: 'block',
+      cursorBlinkVisible: true,
+      atlas: stubAtlas as unknown as GlyphAtlasBase,
+      kittyEnabled: false,
+      blockElementShaderEnabled: false,
+    });
+    expect(callsForA).toBe(2);
+    expect(cellArray[2]! & 0xffff).toBe(0);
+  });
+});

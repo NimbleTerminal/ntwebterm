@@ -44,6 +44,8 @@ export const FLAG_USE_THEME_BG = 1 << 13;
 export const FLAG_IS_CURSOR_CELL = 1 << 14;
 /** The glyph has its own colors (a color emoji): draw them, not the fg. */
 export const FLAG_COLOR_GLYPH = 1 << 15;
+/** SGR 5 blinking text. */
+export const FLAG_BLINK = 1 << 16;
 
 // ---------------------------------------------------------------------------
 // Default theme
@@ -210,6 +212,7 @@ export interface GridUBOState {
   cursorBlinkVisible: boolean;
   cursorStyle: 'block' | 'underline' | 'bar';
   atlasSize: number;
+  scrollOffsetY?: number; // CSS pixel vertical sub-row offset for smooth scrolling
 }
 
 /**
@@ -222,7 +225,7 @@ export interface GridUBOState {
  *   u32[5]   cursorVisible (visible AND blink-on, 0/1)
  *   u32[6,7] cursorPos.xy
  *   u32[8]   cursorStyle (block=0, underline=1, bar=2)
- *   u32[9]   _pad0
+ *   f32[9]   scrollOffsetY (CSS pixel sub-row offset)
  *   u32[10]  atlasSize
  *   u32[11..19] reserved
  */
@@ -238,7 +241,7 @@ export function buildGridUBOBytes(state: GridUBOState): Uint32Array {
   u32[6] = state.cursorX;
   u32[7] = state.cursorY;
   u32[8] = state.cursorStyle === 'block' ? 0 : state.cursorStyle === 'underline' ? 1 : 2;
-  u32[9] = 0;
+  f32[9] = state.scrollOffsetY ?? 0;
   u32[10] = state.atlasSize;
   return u32;
 }
@@ -291,27 +294,39 @@ export function premultiplyAlpha(rgba: Uint8ClampedArray): void {
  */
 export abstract class GlyphAtlasBase {
   protected size: number; // square; powers of 2
+  protected maxSize: number;
   private nextX = 0;
   private nextY = 0;
   private rowHeight = 0;
   private cache = new Map<string, AtlasSlot>();
+  private didGrow = false;
   protected cellW: number;
   protected cellH: number;
   protected fontSize: number;
   protected fontFamily: string;
+  protected dpr: number;
   private offscreen = document.createElement('canvas');
   private offCtx: CanvasRenderingContext2D;
 
-  constructor(cellW: number, cellH: number, fontSize: number, fontFamily: string) {
-    this.cellW = cellW;
-    this.cellH = cellH;
+  constructor(
+    cellW: number,
+    cellH: number,
+    fontSize: number,
+    fontFamily: string,
+    dpr: number = 1,
+    maxSize: number = MAX_ATLAS_SIZE
+  ) {
+    this.dpr = Math.max(1, dpr);
+    this.maxSize = maxSize;
+    this.cellW = Math.max(1, Math.round(cellW * this.dpr));
+    this.cellH = Math.max(1, Math.round(cellH * this.dpr));
     this.fontSize = fontSize;
     this.fontFamily = fontFamily;
     this.size = 1024;
     // Offscreen sized for the widest glyph we support (2 cells for CJK /
-    // emoji). Narrow glyphs only use the left half; we crop the read.
-    this.offscreen.width = cellW * 2;
-    this.offscreen.height = cellH;
+    // emoji) in device pixels. Narrow glyphs only use the left half.
+    this.offscreen.width = this.cellW * 2;
+    this.offscreen.height = this.cellH;
     this.offCtx = this.offscreen.getContext('2d', { willReadFrequently: true })!;
   }
 
@@ -331,22 +346,39 @@ export abstract class GlyphAtlasBase {
    * Subclass hook: grow the underlying texture to `newSize` × `newSize`.
    * After this call returns, getOrRaster will re-rasterize on next miss
    * (the cache is cleared by the caller before invoking growTexture).
-   * Implementations MAY copy old contents (WebGPU does) or skip the copy
-   * (WebGL re-rasterizes on miss; simpler).
    */
   protected abstract growTexture(newSize: number): void;
 
-  reset(cellW: number, cellH: number, fontSize: number, fontFamily: string): void {
-    this.cellW = cellW;
-    this.cellH = cellH;
+  reset(
+    cellW: number,
+    cellH: number,
+    fontSize: number,
+    fontFamily: string,
+    dpr: number = this.dpr
+  ): void {
+    this.dpr = Math.max(1, dpr);
+    this.cellW = Math.max(1, Math.round(cellW * this.dpr));
+    this.cellH = Math.max(1, Math.round(cellH * this.dpr));
     this.fontSize = fontSize;
     this.fontFamily = fontFamily;
     this.cache.clear();
     this.nextX = 0;
     this.nextY = 0;
     this.rowHeight = 0;
-    this.offscreen.width = cellW * 2;
-    this.offscreen.height = cellH;
+    this.didGrow = false;
+    this.offscreen.width = this.cellW * 2;
+    this.offscreen.height = this.cellH;
+  }
+
+  /**
+   * Returns and clears whether the atlas grew or evicted its cache since the
+   * last check. Used by encodeCells to re-encode the current frame so cells
+   * encoded before a mid-frame grow do not reference invalidated slots.
+   */
+  consumeDidGrow(): boolean {
+    const grew = this.didGrow;
+    this.didGrow = false;
+    return grew;
   }
 
   /**
@@ -381,6 +413,10 @@ export abstract class GlyphAtlasBase {
 
     const ctx = this.offCtx;
     ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    if (this.dpr !== 1 && typeof ctx.scale === 'function') {
+      ctx.scale(this.dpr, this.dpr);
+    }
     let style = '';
     if (styleBits & 1) style += 'bold ';
     if (styleBits & 2) style += 'italic ';
@@ -391,9 +427,21 @@ export abstract class GlyphAtlasBase {
     // rather than baked into the rasterization, so faint and non-faint glyphs
     // share the same atlas slot (the cache key drops the FAINT bit too).
     ctx.fillStyle = '#ffffff';
-    if (!drawBoxDrawing(ctx, grapheme, 0, 0, w, h, this.fontSize)) {
-      ctx.fillText(grapheme, 0, baseline);
+    const cssW = w / this.dpr;
+    const cssH = h / this.dpr;
+    if (!drawBoxDrawing(ctx, grapheme, 0, 0, cssW, cssH, this.fontSize)) {
+      let drawX = 0;
+      if (typeof ctx.measureText === 'function') {
+        const m = ctx.measureText(grapheme);
+        const leftBearing = m?.actualBoundingBoxLeft ?? 0;
+        if (leftBearing > 0) {
+          const rightExtent = m?.actualBoundingBoxRight ?? m?.width ?? 0;
+          drawX = Math.min(leftBearing, Math.max(0, cssW - rightExtent));
+        }
+      }
+      ctx.fillText(grapheme, drawX, baseline);
     }
+    ctx.restore();
 
     const img = ctx.getImageData(0, 0, w, h);
     // A color font ignores fillStyle: keep such a glyph's colors, which the
@@ -407,13 +455,16 @@ export abstract class GlyphAtlasBase {
   }
 
   private grow(): void {
-    const newSize = this.size * 2;
+    const newSize = Math.min(this.maxSize, this.size * 2);
     this.cache.clear();
     this.nextX = 0;
     this.nextY = 0;
     this.rowHeight = 0;
-    this.growTexture(newSize);
-    this.size = newSize;
+    this.didGrow = true;
+    if (newSize > this.size) {
+      this.growTexture(newSize);
+      this.size = newSize;
+    }
   }
 
   get atlasSize(): number {
@@ -540,177 +591,180 @@ export function encodeCells(
   }
 
   const defaultEmptyFlags = (FLAG_USE_THEME_FG | FLAG_USE_THEME_BG) >>> 0;
-  const cellW = ctx.metrics.width;
-  const cellH = ctx.metrics.height;
 
   // Batch-fetch the entire viewport once to avoid the WASM crossing cost
   // of getLine(y) inside the loop.
   const viewport = buffer.getViewport();
+  ctx.atlas?.consumeDidGrow?.();
 
-  for (let y = 0; y < dims.rows; y++) {
-    updateRowSel(y);
-    let line: GhosttyCell[] | null = null;
-    if (viewportY > 0) {
-      if (y < viewportY && sb) {
-        const off = sbLen - Math.floor(viewportY) + y;
-        line = sb.getScrollbackLine(off);
+  for (let pass = 0; pass < 2; pass++) {
+    if (pass > 0) {
+      arr.fill(0);
+    }
+    for (let y = 0; y < dims.rows; y++) {
+      updateRowSel(y);
+      let line: GhosttyCell[] | null = null;
+      if (viewportY > 0) {
+        if (y < viewportY && sb) {
+          const off = sbLen - Math.floor(viewportY) + y;
+          line = sb.getScrollbackLine(off);
+        } else {
+          const viewportRelativeY = y - Math.floor(viewportY);
+          const start = viewportRelativeY * dims.cols;
+          line = viewport.slice(start, start + dims.cols);
+        }
       } else {
-        const viewportRelativeY = y - Math.floor(viewportY);
-        const start = viewportRelativeY * dims.cols;
+        const start = y * dims.cols;
         line = viewport.slice(start, start + dims.cols);
       }
-    } else {
-      const start = y * dims.cols;
-      line = viewport.slice(start, start + dims.cols);
-    }
 
-    const bidiMap = ctx.bidiMapper && line ? ctx.bidiMapper.getMap(line) : null;
-    const reorder = bidiMap !== null && !bidiMap.isIdentity;
+      const bidiMap = ctx.bidiMapper && line ? ctx.bidiMapper.getMap(line) : null;
+      const reorder = bidiMap !== null && !bidiMap.isIdentity;
 
-    let pendingRightHalf: {
-      slotU: number;
-      slotV: number;
-      slotH: number;
-      fgPacked: number;
-      bgPacked: number;
-      flags: number;
-    } | null = null;
-    for (let x = 0; x < dims.cols; x++) {
-      const i = (y * dims.cols + x) * CELL_U32S;
-      const lx = reorder && x < bidiMap!.visualToLogical.length ? bidiMap!.visualToLogical[x]! : x;
-      const c = line && lx < line.length ? line[lx] : null;
-      if (!c || c.width === 0) {
-        if (pendingRightHalf) {
-          arr[i + 0] = pendingRightHalf.fgPacked;
-          arr[i + 1] = pendingRightHalf.bgPacked;
-          arr[i + 2] =
-            ((pendingRightHalf.slotU + cellW) & 0xffff) | ((pendingRightHalf.slotV & 0xffff) << 16);
-          arr[i + 3] = (cellW & 0xffff) | ((pendingRightHalf.slotH & 0xffff) << 16);
-          arr[i + 4] = pendingRightHalf.flags;
-          pendingRightHalf = null;
-        } else {
-          arr[i + 4] = defaultEmptyFlags;
+      let pendingRightHalf: {
+        slotU: number;
+        slotV: number;
+        halfW: number;
+        slotH: number;
+        fgPacked: number;
+        bgPacked: number;
+        flags: number;
+      } | null = null;
+      for (let x = 0; x < dims.cols; x++) {
+        const i = (y * dims.cols + x) * CELL_U32S;
+        const lx =
+          reorder && x < bidiMap!.visualToLogical.length ? bidiMap!.visualToLogical[x]! : x;
+        const c = line && lx < line.length ? line[lx] : null;
+        if (!c || c.width === 0) {
+          if (pendingRightHalf) {
+            arr[i + 0] = pendingRightHalf.fgPacked;
+            arr[i + 1] = pendingRightHalf.bgPacked;
+            arr[i + 2] =
+              ((pendingRightHalf.slotU + pendingRightHalf.halfW) & 0xffff) |
+              ((pendingRightHalf.slotV & 0xffff) << 16);
+            arr[i + 3] =
+              (pendingRightHalf.halfW & 0xffff) | ((pendingRightHalf.slotH & 0xffff) << 16);
+            arr[i + 4] = pendingRightHalf.flags;
+            pendingRightHalf = null;
+          } else {
+            arr[i + 4] = defaultEmptyFlags;
+          }
+          continue;
         }
-        continue;
-      }
-      pendingRightHalf = null;
-      let flags = 0;
-      if (c.flags & CellFlags.BOLD) flags |= FLAG_BOLD;
-      if (c.flags & CellFlags.ITALIC) flags |= FLAG_ITALIC;
-      if (c.flags & CellFlags.UNDERLINE) flags |= FLAG_UNDERLINE;
-      if (c.flags & CellFlags.STRIKETHROUGH) flags |= FLAG_STRIKETHROUGH;
-      if (c.flags & CellFlags.INVERSE) flags |= FLAG_INVERSE;
-      if (c.flags & CellFlags.FAINT) flags |= FLAG_FAINT;
-      if (c.flags & CellFlags.INVISIBLE) flags |= FLAG_INVISIBLE;
-      if (c.fgIsDefault) flags |= FLAG_USE_THEME_FG;
-      if (c.bgIsDefault) flags |= FLAG_USE_THEME_BG;
-      const selectionCol = selectionUsesLogicalColumns ? lx : x;
-      if (selectionCol >= selStartCol && selectionCol <= selEndCol) {
-        flags |= FLAG_IS_SELECTED;
-      }
-      if (c.hyperlink_id !== 0 && c.hyperlink_id === ctx.hoveredHyperlinkId) {
-        flags |= FLAG_IS_HYPERLINK_HOVERED;
-      }
-      if (ctx.hoveredLinkRange) {
-        const r = ctx.hoveredLinkRange;
-        const inRange =
-          (y === r.startY && lx >= r.startX && (y < r.endY || lx <= r.endX)) ||
-          (y > r.startY && y < r.endY) ||
-          (y === r.endY && lx <= r.endX && (y > r.startY || lx >= r.startX));
-        if (inRange) flags |= FLAG_IS_LINK_RANGE_HOVERED;
-      }
-      const cp = c.codepoint || 0;
-      if (buffer.getImageFrame && cp === KITTY_PLACEHOLDER) flags |= FLAG_INVISIBLE;
-      if (ctx.kittyEnabled && !buffer.getImageFrame && cp === KITTY_PLACEHOLDER) {
-        // Combining diacritics ride on the cell as `c.grapheme` (extras
-        // beyond the base codepoint), populated by GhosttyTerminal.getViewport
-        // during the existing per-cell walk. Reading them here avoids the
-        // O(row) buffer.getGrapheme(y, x) crossing — for placeholder-heavy
-        // viewports that single change drops per-frame WASM crossings from
-        // tens of thousands to ~zero.
-        const extras = c.grapheme;
-        if (extras && extras.length >= 2) {
-          const rowD = diacriticToInt(extras[0]!);
-          const colD = diacriticToInt(extras[1]!);
-          if (rowD >= 0 && colD >= 0) {
-            const fgRgb = (c.fg_r << 16) | (c.fg_g << 8) | c.fg_b;
-            let imageId = fgRgb;
-            if (extras.length >= 3) {
-              const msb = diacriticToInt(extras[2]!);
-              if (msb >= 0) imageId = (msb << 24) | fgRgb;
-            }
-            const placement = kittyVirtualPlacements.get(imageId);
-            const idx = usedKittyImageIndex.get(imageId);
-            if (placement && idx !== undefined) {
-              flags |= FLAG_IS_KITTY_PLACEHOLDER;
-              arr[i + 5] = (colD & 0xffff) | ((rowD & 0xffff) << 16);
-              arr[i + 6] = idx;
-              arr[i + 7] = (placement.gridCols & 0xffff) | ((placement.gridRows & 0xffff) << 16);
-            } else {
-              // A valid graphics cell can outlive its placement during an
-              // image replacement. Its private-use codepoint is not text:
-              // drawing the font's missing-glyph box flashes a whole grid.
-              flags |= FLAG_INVISIBLE;
+        pendingRightHalf = null;
+        let flags = 0;
+        if (c.flags & CellFlags.BOLD) flags |= FLAG_BOLD;
+        if (c.flags & CellFlags.ITALIC) flags |= FLAG_ITALIC;
+        if (c.flags & CellFlags.UNDERLINE) flags |= FLAG_UNDERLINE;
+        if (c.flags & CellFlags.STRIKETHROUGH) flags |= FLAG_STRIKETHROUGH;
+        if (c.flags & CellFlags.INVERSE) flags |= FLAG_INVERSE;
+        if (c.flags & CellFlags.FAINT) flags |= FLAG_FAINT;
+        if (c.flags & CellFlags.BLINK) {
+          flags |= FLAG_BLINK;
+          if (!ctx.cursorBlinkVisible) flags |= FLAG_INVISIBLE;
+        }
+        if (c.flags & CellFlags.INVISIBLE) flags |= FLAG_INVISIBLE;
+        if (c.fgIsDefault) flags |= FLAG_USE_THEME_FG;
+        if (c.bgIsDefault) flags |= FLAG_USE_THEME_BG;
+        const selectionCol = selectionUsesLogicalColumns ? lx : x;
+        if (selectionCol >= selStartCol && selectionCol <= selEndCol) {
+          flags |= FLAG_IS_SELECTED;
+        }
+        if (c.hyperlink_id !== 0 && c.hyperlink_id === ctx.hoveredHyperlinkId) {
+          flags |= FLAG_IS_HYPERLINK_HOVERED;
+        }
+        if (ctx.hoveredLinkRange) {
+          const r = ctx.hoveredLinkRange;
+          const inRange =
+            (y === r.startY && lx >= r.startX && (y < r.endY || lx <= r.endX)) ||
+            (y > r.startY && y < r.endY) ||
+            (y === r.endY && lx <= r.endX && (y > r.startY || lx >= r.startX));
+          if (inRange) flags |= FLAG_IS_LINK_RANGE_HOVERED;
+        }
+        const cp = c.codepoint || 0;
+        if (buffer.getImageFrame && cp === KITTY_PLACEHOLDER) flags |= FLAG_INVISIBLE;
+        if (ctx.kittyEnabled && !buffer.getImageFrame && cp === KITTY_PLACEHOLDER) {
+          const extras = c.grapheme;
+          if (extras && extras.length >= 2) {
+            const rowD = diacriticToInt(extras[0]!);
+            const colD = diacriticToInt(extras[1]!);
+            if (rowD >= 0 && colD >= 0) {
+              const fgRgb = (c.fg_r << 16) | (c.fg_g << 8) | c.fg_b;
+              let imageId = fgRgb;
+              if (extras.length >= 3) {
+                const msb = diacriticToInt(extras[2]!);
+                if (msb >= 0) imageId = (msb << 24) | fgRgb;
+              }
+              const placement = kittyVirtualPlacements.get(imageId);
+              const idx = usedKittyImageIndex.get(imageId);
+              if (placement && idx !== undefined) {
+                flags |= FLAG_IS_KITTY_PLACEHOLDER;
+                arr[i + 5] = (colD & 0xffff) | ((rowD & 0xffff) << 16);
+                arr[i + 6] = idx;
+                arr[i + 7] = (placement.gridCols & 0xffff) | ((placement.gridRows & 0xffff) << 16);
+              } else {
+                flags |= FLAG_INVISIBLE;
+              }
             }
           }
         }
-      }
-      if (ctx.blockElementShaderEnabled && cp >= 0x2580 && cp <= 0x259f && c.grapheme_len === 0) {
-        flags |= FLAG_IS_BLOCK_ELEMENT;
-        arr[i + 5] = cp - 0x2580;
-      }
-      // Pack colors as little-endian rgba8.
-      arr[i + 0] = c.fg_r | (c.fg_g << 8) | (c.fg_b << 16);
-      arr[i + 1] = c.bg_r | (c.bg_g << 8) | (c.bg_b << 16);
-      // Skip atlas lookup for invisible / kitty-placeholder / block-element cells.
-      const skipAtlas =
-        (flags & (FLAG_INVISIBLE | FLAG_IS_KITTY_PLACEHOLDER | FLAG_IS_BLOCK_ELEMENT)) !== 0;
-      if (!skipAtlas && ctx.atlas) {
-        // Build the grapheme cluster string from cell-resident data.
-        // c.grapheme (extras) was populated by GhosttyTerminal.getViewport
-        // during its existing per-cell walk; reading it here avoids the
-        // O(row) buffer.getGraphemeString(y, x) crossing for every emoji /
-        // ZWJ / Indic-cluster cell.
-        const extras = c.grapheme;
-        const mirroredCp = reorder ? bidiMap!.mirror?.get(lx) : undefined;
-        const baseCp = mirroredCp ?? (c.codepoint || 32);
-        const grapheme =
-          extras && extras.length > 0
-            ? String.fromCodePoint(baseCp, ...extras)
-            : String.fromCodePoint(baseCp);
-        // FAINT is intentionally NOT included in the atlas style bits. The atlas
-        // always rasterizes glyphs at full alpha; shaders apply the 0.5 alpha
-        // multiplier for FAINT cells. Including FAINT here would (a) double the
-        // fade (atlas 0.5 × shader 0.5 = 0.25) and (b) inflate the atlas cache
-        // with redundant per-glyph faint variants.
-        const styleBits = (flags & FLAG_BOLD ? 1 : 0) | (flags & FLAG_ITALIC ? 2 : 0);
-        const widthInCells = c.width === 2 ? 2 : 1;
-        const slot = ctx.atlas.getOrRaster(grapheme, styleBits, ctx.metrics.baseline, widthInCells);
-        if (slot.color) flags |= FLAG_COLOR_GLYPH;
-        arr[i + 2] = (slot.u & 0xffff) | ((slot.v & 0xffff) << 16);
-        arr[i + 3] =
-          widthInCells === 2
-            ? (cellW & 0xffff) | ((cellH & 0xffff) << 16)
-            : (slot.w & 0xffff) | ((slot.h & 0xffff) << 16);
-        if (widthInCells === 2) {
-          pendingRightHalf = {
-            slotU: slot.u,
-            slotV: slot.v,
-            slotH: slot.h,
-            fgPacked: arr[i + 0]!,
-            bgPacked: arr[i + 1]!,
-            flags: 0,
-          };
+        if (ctx.blockElementShaderEnabled && cp >= 0x2580 && cp <= 0x259f && c.grapheme_len === 0) {
+          flags |= FLAG_IS_BLOCK_ELEMENT;
+          arr[i + 5] = cp - 0x2580;
         }
+        // Pack colors as little-endian rgba8.
+        arr[i + 0] = c.fg_r | (c.fg_g << 8) | (c.fg_b << 16);
+        arr[i + 1] = c.bg_r | (c.bg_g << 8) | (c.bg_b << 16);
+        // Skip atlas lookup for invisible / kitty-placeholder / block-element cells.
+        const skipAtlas =
+          (flags & (FLAG_INVISIBLE | FLAG_IS_KITTY_PLACEHOLDER | FLAG_IS_BLOCK_ELEMENT)) !== 0;
+        if (!skipAtlas && ctx.atlas) {
+          const extras = c.grapheme;
+          const mirroredCp = reorder ? bidiMap!.mirror?.get(lx) : undefined;
+          const baseCp = mirroredCp ?? (c.codepoint || 32);
+          const grapheme =
+            extras && extras.length > 0
+              ? String.fromCodePoint(baseCp, ...extras)
+              : String.fromCodePoint(baseCp);
+          const styleBits = (flags & FLAG_BOLD ? 1 : 0) | (flags & FLAG_ITALIC ? 2 : 0);
+          const widthInCells = c.width === 2 ? 2 : 1;
+          const slot = ctx.atlas.getOrRaster(
+            grapheme,
+            styleBits,
+            ctx.metrics.baseline,
+            widthInCells
+          );
+          if (slot.color) flags |= FLAG_COLOR_GLYPH;
+          const halfSlotW = Math.max(1, slot.w >> 1);
+          arr[i + 2] = (slot.u & 0xffff) | ((slot.v & 0xffff) << 16);
+          arr[i + 3] =
+            widthInCells === 2
+              ? (halfSlotW & 0xffff) | ((slot.h & 0xffff) << 16)
+              : (slot.w & 0xffff) | ((slot.h & 0xffff) << 16);
+          if (widthInCells === 2) {
+            pendingRightHalf = {
+              slotU: slot.u,
+              slotV: slot.v,
+              halfW: halfSlotW,
+              slotH: slot.h,
+              fgPacked: arr[i + 0]!,
+              bgPacked: arr[i + 1]!,
+              flags: 0,
+            };
+          }
+        }
+        arr[i + 4] = flags >>> 0;
+        if (pendingRightHalf) pendingRightHalf.flags = flags >>> 0;
       }
-      arr[i + 4] = flags >>> 0;
-      if (pendingRightHalf) pendingRightHalf.flags = flags >>> 0;
+    }
+    if (!ctx.atlas?.consumeDidGrow?.()) {
+      break;
     }
   }
 
   // Cursor cell flag (block-style only — non-block cursors drawn as separate
-  // quad in the cursor pipeline).
-  if (cursor.visible && ctx.cursorBlinkVisible && ctx.cursorStyle === 'block') {
+  // quad in the cursor pipeline). Only apply when at the bottom of scrollback.
+  if (viewportY === 0 && cursor.visible && ctx.cursorBlinkVisible && ctx.cursorStyle === 'block') {
     let cursorX = cursor.x;
     if (ctx.bidiMapper) {
       const start = cursor.y * dims.cols;
@@ -953,6 +1007,7 @@ export abstract class KittyAtlasBase {
   private nextY = 0;
   private rowHeight = 0;
   private cache = new Map<number, KittyAtlasEntry>();
+  private didReset = false;
 
   constructor(size = 1024) {
     this.size = size;
@@ -1044,6 +1099,14 @@ export abstract class KittyAtlasBase {
     this.nextX = 0;
     this.nextY = 0;
     this.rowHeight = 0;
+    this.didReset = true;
+  }
+
+  /** Returns and clears whether clearAndReset() ran since the last check. */
+  consumeDidReset(): boolean {
+    const r = this.didReset;
+    this.didReset = false;
+    return r;
   }
 
   get atlasSize(): number {

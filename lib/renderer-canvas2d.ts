@@ -436,6 +436,7 @@ export class CanvasRenderer implements Renderer {
     // Refresh trackers managed only by the gate; the existing render()
     // body keeps lastCursorPosition / lastViewportY / invalidateNext
     // up to date through its own paths.
+    const blinkStateChanged = cursorBlinkVisible !== this.lastCursorBlinkVisible;
     this.lastCursorVisible = cursorEarly.visible;
     this.lastCursorBlinkVisible = cursorBlinkVisible;
     this.lastSelectionSig = selSig ?? this.computeSelectionSig();
@@ -622,7 +623,7 @@ export class CanvasRenderer implements Renderer {
     const rowsToRender = new Set<number>();
     for (let y = 0; y < dims.rows; y++) {
       // When scrolled, always force render all lines since we're showing scrollback
-      const needsRender =
+      let needsRender =
         viewportY > 0
           ? true
           : forceAllMut ||
@@ -631,11 +632,35 @@ export class CanvasRenderer implements Renderer {
             hyperlinkRows.has(y) ||
             this.kittyDamagedRows.has(y);
 
+      if (!needsRender && blinkStateChanged) {
+        const line = getScreenLine(y);
+        if (line?.some((c) => (c.flags & CellFlags.BLINK) !== 0)) {
+          needsRender = true;
+        }
+      }
+
       if (needsRender) {
         rowsToRender.add(y);
         // Include adjacent rows to handle glyph overflow
         if (y > 0) rowsToRender.add(y - 1);
         if (y < dims.rows - 1) rowsToRender.add(y + 1);
+      }
+    }
+
+    const fracY = viewportY > 0 ? viewportY - Math.floor(viewportY) : 0;
+    const scrollOffsetY = fracY * this.metrics.height;
+    if (scrollOffsetY !== 0) {
+      this.ctx.save();
+      this.ctx.translate(0, scrollOffsetY);
+      if (scrollbackProvider) {
+        const topOffset = scrollbackLength - Math.floor(viewportY) - 1;
+        if (topOffset >= 0) {
+          const topLine = scrollbackProvider.getScrollbackLine(topOffset);
+          if (topLine) {
+            anyLinesRendered = true;
+            this.renderLine(topLine, -1, dims.cols);
+          }
+        }
       }
     }
 
@@ -695,6 +720,10 @@ export class CanvasRenderer implements Renderer {
     // flips anyLinesRendered to true.
     if (this.currentDirectPlacements.length > 0 && anyLinesRendered) {
       this.renderKittyImages();
+    }
+
+    if (scrollOffsetY !== 0) {
+      this.ctx.restore();
     }
 
     // Render cursor (only if we're at the bottom, not scrolled)
@@ -839,8 +868,11 @@ export class CanvasRenderer implements Renderer {
       if (this.renderPlaceholderCell(cell, x, y)) return;
     }
 
-    // Skip rendering if invisible
-    if (cell.flags & CellFlags.INVISIBLE) {
+    // Skip rendering if invisible or blinked off
+    if (
+      cell.flags & CellFlags.INVISIBLE ||
+      (cell.flags & CellFlags.BLINK && !this.cursorBlink_.isVisible())
+    ) {
       return;
     }
 
@@ -1596,7 +1628,23 @@ export class CanvasRenderer implements Renderer {
             this.ctx.beginPath();
             this.ctx.rect(cursorX, cursorY, this.metrics.width, this.metrics.height);
             this.ctx.clip();
-            this.renderCellText(line[x], vx, y, this.theme.cursorAccent, map?.mirror?.get(x), x);
+            if (line[x].width === 0 && x > 0 && line[x - 1]?.width === 2) {
+              const leadX = x - 1;
+              const leadVx =
+                map && !map.isIdentity && leadX < map.logicalToVisual.length
+                  ? map.logicalToVisual[leadX]!
+                  : leadX;
+              this.renderCellText(
+                line[leadX]!,
+                leadVx,
+                y,
+                this.theme.cursorAccent,
+                map?.mirror?.get(leadX),
+                leadX
+              );
+            } else {
+              this.renderCellText(line[x], vx, y, this.theme.cursorAccent, map?.mirror?.get(x), x);
+            }
             this.ctx.restore();
           }
         }

@@ -2,20 +2,8 @@ import { DEFAULT_FONT_FAMILY } from './fonts';
 /**
  * WebGL2 renderer.
  *
- * Implementation grows across the WebGL backend plan tasks:
- *   T3:  context init, DPR-aware canvas sizing, clear-only render
- *   T4:  GLGlyphAtlas
- *   T5:  encodeCells (kitty branches removed)
- *   T6:  paletteUBO + gridUBO byte construction
- *   T7:  cell texture allocation + upload
- *   T8:  text vertex/fragment shaders + program
- *   T9:  text-program render path
- *   T10: cursor shader + program
- *   T11: cursor render path + cursor-blink
- *   T12: setters / lifecycle
- *   T13: webglcontextlost listener API
- *
- * Kitty images use layered textured rectangles; block elements use the glyph atlas.
+ * Renders the terminal grid, block elements, cursor, and Kitty graphics
+ * (direct and virtual placements) using WebGL2 instanced draws and UBOs.
  */
 
 import type { ImageFrame } from './render-images';
@@ -56,7 +44,7 @@ layout(std140) uniform GridUBO {
   uint cursorVisible;
   uvec2 cursorPos;
   uint cursorStyle;
-  float _pad0;
+  float scrollOffsetY;
   uint atlasSize;
   uint _r1; uint _r2; uint _r3; uint _r4;
   uint _r5; uint _r6; uint _r7; uint _r8; uint _r9;
@@ -92,7 +80,7 @@ void main() {
   uint row = uint(gl_InstanceID) / grid.gridSize.x;
   vec2 local = CORNERS[gl_VertexID];
   float cssX = (float(col) + local.x) * grid.cellSize.x;
-  float cssY = (float(row) + local.y) * grid.cellSize.y;
+  float cssY = (float(row) + local.y) * grid.cellSize.y + grid.scrollOffsetY;
   float canvasW = float(grid.gridSize.x) * grid.cellSize.x;
   float canvasH = float(grid.gridSize.y) * grid.cellSize.y;
   float ndcX = (cssX / canvasW) * 2.0 - 1.0;
@@ -117,6 +105,7 @@ const uint FLAG_INVISIBLE = 1u << 6;
 const uint FLAG_IS_SELECTED = 1u << 7;
 const uint FLAG_IS_HYPERLINK_HOVERED = 1u << 8;
 const uint FLAG_IS_LINK_RANGE_HOVERED = 1u << 9;
+const uint FLAG_IS_BLOCK_ELEMENT = 1u << 10;
 const uint FLAG_IS_KITTY_PLACEHOLDER = 1u << 11;
 const uint FLAG_USE_THEME_FG = 1u << 12;
 const uint FLAG_USE_THEME_BG = 1u << 13;
@@ -137,6 +126,32 @@ vec3 unpackRgb(uint p) {
   float g = float((p >> 8) & 0xffu) / 255.0;
   float b = float((p >> 16) & 0xffu) / 255.0;
   return vec3(r, g, b);
+}
+bool drawBlockElement(uint idx, vec2 uv) {
+  if (idx == 0u) return uv.y < 0.5;
+  if (idx >= 1u && idx <= 8u) return uv.y >= 1.0 - float(idx) / 8.0;
+  if (idx >= 9u && idx <= 15u) return uv.x < (16.0 - float(idx)) / 8.0;
+  if (idx == 16u) return uv.x >= 0.5;
+  if (idx >= 17u && idx <= 19u) return false;
+  if (idx == 20u) return uv.y < 1.0 / 8.0;
+  if (idx == 21u) return uv.x >= 7.0 / 8.0;
+  if (idx == 22u) return uv.x < 0.5 && uv.y >= 0.5;
+  if (idx == 23u) return uv.x >= 0.5 && uv.y >= 0.5;
+  if (idx == 24u) return uv.x < 0.5 && uv.y < 0.5;
+  if (idx == 25u) return (uv.x < 0.5) || (uv.y >= 0.5);
+  if (idx == 26u) return (uv.x < 0.5) == (uv.y < 0.5);
+  if (idx == 27u) return !(uv.x >= 0.5 && uv.y >= 0.5);
+  if (idx == 28u) return !(uv.x < 0.5 && uv.y >= 0.5);
+  if (idx == 29u) return uv.x >= 0.5 && uv.y < 0.5;
+  if (idx == 30u) return (uv.x < 0.5) != (uv.y < 0.5);
+  if (idx == 31u) return uv.x >= 0.5 || uv.y >= 0.5;
+  return false;
+}
+float blockShade(uint idx) {
+  if (idx == 17u) return 0.25;
+  if (idx == 18u) return 0.5;
+  if (idx == 19u) return 0.75;
+  return 0.0;
 }
 void main() {
   int cellX = vCellIdx % int(grid.gridSize.x);
@@ -178,7 +193,24 @@ void main() {
     uint imgIdx = c1.z;
     vec4 rect = kittyAtlas.rects[imgIdx];  // (uMin, vMin, uMax, vMax) in atlas-normalized coords
     vec2 atlasUv = mix(rect.xy, rect.zw, vec2(uvX, uvY));
-    fragColor = texture(uKittyAtlas, atlasUv);
+    vec4 kTex = texture(uKittyAtlas, atlasUv);
+    fragColor = uTextPass == 2
+      ? vec4(kTex.rgb * kTex.a, kTex.a)
+      : vec4(mix(bg, kTex.rgb, kTex.a), 1.0);
+    return;
+  }
+  if ((flags & FLAG_IS_BLOCK_ELEMENT) != 0u) {
+    uint idx = c1.y;
+    float shade = blockShade(idx);
+    if (shade > 0.0) {
+      fragColor = vec4(mix(bg, fg, shade), uTextPass == 2 ? shade : 1.0);
+      return;
+    }
+    if (drawBlockElement(idx, vUv)) {
+      fragColor = vec4(fg, 1.0);
+      return;
+    }
+    fragColor = vec4(bg, uTextPass == 2 ? 0.0 : 1.0);
     return;
   }
   vec2 auv = vec2(float(atlasUV & 0xffffu), float((atlasUV >> 16) & 0xffffu));
@@ -300,9 +332,14 @@ export class GLGlyphAtlas extends GlyphAtlasBase {
     cellW: number,
     cellH: number,
     fontSize: number,
-    fontFamily: string
+    fontFamily: string,
+    dpr = 1
   ) {
-    super(cellW, cellH, fontSize, fontFamily);
+    const maxTexSize =
+      typeof gl.getParameter === 'function'
+        ? (gl.getParameter(0x0d33 /* MAX_TEXTURE_SIZE */) as number) || 8192
+        : 8192;
+    super(cellW, cellH, fontSize, fontFamily, dpr, maxTexSize);
     this.gl = gl;
     const tex = this.createBackingTexture(this.size);
     if (!tex) throw new Error('GLGlyphAtlas: createTexture failed');
@@ -668,7 +705,7 @@ export class WebGL2Renderer implements Renderer {
       cursorBlinkVisible: this.cursorBlink_.isVisible(),
       atlas: this.atlas,
       kittyEnabled: true,
-      blockElementShaderEnabled: false,
+      blockElementShaderEnabled: true,
       maxKittyImages: 256,
     });
     return { cellArray: this.cellArray, usedKittyImageIds };
@@ -685,7 +722,7 @@ export class WebGL2Renderer implements Renderer {
   }
 
   private uploadGridUBO(
-    _viewportY: number,
+    viewportY: number,
     cursor: { x: number; y: number; visible: boolean }
   ): void {
     if (!this.gridUBO) return;
@@ -698,10 +735,11 @@ export class WebGL2Renderer implements Renderer {
       dpr: this.dpr,
       cursorX: cursor.x,
       cursorY: cursor.y,
-      cursorVisible: cursor.visible,
+      cursorVisible: viewportY === 0 && cursor.visible,
       cursorBlinkVisible: this.cursorBlink_.isVisible(),
       cursorStyle: this.cursorStyle,
       atlasSize: this.atlas?.atlasSize ?? 1024,
+      scrollOffsetY: viewportY > 0 ? (viewportY - Math.floor(viewportY)) * this.metrics.height : 0,
     } satisfies GridUBOState);
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.gridUBO);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, u32);
@@ -735,10 +773,17 @@ export class WebGL2Renderer implements Renderer {
         this.metrics.width,
         this.metrics.height,
         this.fontSize,
-        this.fontFamily
+        this.fontFamily,
+        this.dpr
       );
     } else {
-      this.atlas.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+      this.atlas.reset(
+        this.metrics.width,
+        this.metrics.height,
+        this.fontSize,
+        this.fontFamily,
+        this.dpr
+      );
     }
 
     if (!this.kittyAtlas) {
@@ -838,17 +883,25 @@ export class WebGL2Renderer implements Renderer {
     this.kittyAtlasRects.fill(0);
     const kittyGraphics = buffer.getKittyGraphics?.() ?? null;
     if (kittyGraphics !== null && this.kittyAtlas && usedKittyImageIds.length > 0) {
-      for (let i = 0; i < usedKittyImageIds.length; i++) {
-        const id = usedKittyImageIds[i]!;
-        const pixels = buffer.getKittyImagePixels?.(kittyGraphics, id);
-        if (!pixels) continue;
-        const entry = this.kittyAtlas.addOrUpdate(id, pixels);
-        if (!entry) continue;
-        const size = this.kittyAtlas.atlasSize;
-        this.kittyAtlasRects[i * 4 + 0] = entry.slot.u / size;
-        this.kittyAtlasRects[i * 4 + 1] = entry.slot.v / size;
-        this.kittyAtlasRects[i * 4 + 2] = (entry.slot.u + entry.slot.w) / size;
-        this.kittyAtlasRects[i * 4 + 3] = (entry.slot.v + entry.slot.h) / size;
+      const populateKittyAtlas = (): void => {
+        this.kittyAtlasRects.fill(0);
+        for (let i = 0; i < usedKittyImageIds.length; i++) {
+          const id = usedKittyImageIds[i]!;
+          const pixels = buffer.getKittyImagePixels?.(kittyGraphics, id);
+          if (!pixels) continue;
+          const entry = this.kittyAtlas!.addOrUpdate(id, pixels);
+          if (!entry) continue;
+          const size = this.kittyAtlas!.atlasSize;
+          this.kittyAtlasRects[i * 4 + 0] = entry.slot.u / size;
+          this.kittyAtlasRects[i * 4 + 1] = entry.slot.v / size;
+          this.kittyAtlasRects[i * 4 + 2] = (entry.slot.u + entry.slot.w) / size;
+          this.kittyAtlasRects[i * 4 + 3] = (entry.slot.v + entry.slot.h) / size;
+        }
+      };
+      this.kittyAtlas.consumeDidReset();
+      populateKittyAtlas();
+      if (this.kittyAtlas.consumeDidReset()) {
+        populateKittyAtlas();
       }
     }
     if (this.kittyAtlasUBO) {
@@ -862,6 +915,8 @@ export class WebGL2Renderer implements Renderer {
     if (this.imageFrame || (kittyGraphics !== null && buffer.iterPlacements)) {
       const cssW = this.cols * this.metrics.width;
       const cssH = this.rows * this.metrics.height;
+      const scrollOffsetY =
+        viewportY > 0 ? (viewportY - Math.floor(viewportY)) * this.metrics.height : 0;
       for (const p of this.imageFrame?.placements ?? buffer.iterPlacements!(kittyGraphics!, true)) {
         if ('isVirtual' in p && p.isVirtual) continue;
         const pixels = this.imageFrame
@@ -876,7 +931,8 @@ export class WebGL2Renderer implements Renderer {
         params[2] = p.sourceWidth;
         params[3] = p.sourceHeight;
         params[4] = p.viewportCol * this.metrics.width + ('offsetX' in p ? p.offsetX : 0);
-        params[5] = p.viewportRow * this.metrics.height + ('offsetY' in p ? p.offsetY : 0);
+        params[5] =
+          p.viewportRow * this.metrics.height + ('offsetY' in p ? p.offsetY : 0) + scrollOffsetY;
         params[6] = p.pixelWidth;
         params[7] = p.pixelHeight;
         params[8] = pixels.width;
@@ -982,6 +1038,7 @@ export class WebGL2Renderer implements Renderer {
     // Cursor pass — only for non-block styles. Block cursor is handled by the
     // text pass via FLAG_IS_CURSOR_CELL.
     if (
+      viewportY === 0 &&
       this.cursorProgram &&
       this.vao &&
       this.gridUBO &&
@@ -1015,7 +1072,13 @@ export class WebGL2Renderer implements Renderer {
   setFontSize(size: number): void {
     this.fontSize = size;
     this.metrics = this.measureFont();
-    this.atlas?.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+    this.atlas?.reset(
+      this.metrics.width,
+      this.metrics.height,
+      this.fontSize,
+      this.fontFamily,
+      this.dpr
+    );
     this.invalidateNext = true;
     this.onRequestRender?.();
   }
@@ -1023,7 +1086,13 @@ export class WebGL2Renderer implements Renderer {
   setFontFamily(family: string): void {
     this.fontFamily = family;
     this.metrics = this.measureFont();
-    this.atlas?.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+    this.atlas?.reset(
+      this.metrics.width,
+      this.metrics.height,
+      this.fontSize,
+      this.fontFamily,
+      this.dpr
+    );
     this.invalidateNext = true;
     this.onRequestRender?.();
   }
@@ -1074,7 +1143,13 @@ export class WebGL2Renderer implements Renderer {
   remeasureFont(): void {
     this.dpr = window.devicePixelRatio || 1;
     this.metrics = this.measureFont();
-    this.atlas?.reset(this.metrics.width, this.metrics.height, this.fontSize, this.fontFamily);
+    this.atlas?.reset(
+      this.metrics.width,
+      this.metrics.height,
+      this.fontSize,
+      this.fontFamily,
+      this.dpr
+    );
     this.invalidateNext = true;
   }
 
@@ -1101,7 +1176,7 @@ export class WebGL2Renderer implements Renderer {
     // reclaim it.
   }
 
-  /** T13 will register a callback fired on webglcontextlost. */
+  /** Register a callback fired on webglcontextlost. */
   onContextLost(fn: (info: { reason: string }) => void): void {
     this.contextLostListeners.push(fn);
   }
