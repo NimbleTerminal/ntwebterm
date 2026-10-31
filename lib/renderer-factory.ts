@@ -45,7 +45,7 @@ async function tryWebGPU(
     if (explicit) throw e;
     if (!warnedWebGPUFallback) {
       warnedWebGPUFallback = true;
-      console.warn('[ghostty-web] WebGPU init failed, trying WebGL2:', e);
+      console.warn('[ntwebterm] WebGPU init failed, trying WebGL2:', e);
     }
     return null;
   }
@@ -62,7 +62,7 @@ async function tryWebGL(
     if (explicit) throw e;
     if (!warnedWebGLFallback) {
       warnedWebGLFallback = true;
-      console.warn('[ghostty-web] WebGL2 init failed, falling back to Canvas2D:', e);
+      console.warn('[ntwebterm] WebGL2 init failed, falling back to Canvas2D:', e);
     }
     return null;
   }

@@ -1,16 +1,16 @@
 {
-  "name": "ghostty-web",
-  "version": "0.3.0",
+  "name": "ntwebterm",
+  "version": "0.4.0",
   "description": "Web-based terminal emulator using Ghostty's VT100 parser via WebAssembly",
   "type": "module",
-  "main": "./dist/ghostty-web.umd.cjs",
-  "module": "./dist/ghostty-web.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/ntwebterm.umd.cjs",
+  "module": "./dist/ntwebterm.js",
+  "types": "./dist/ntwebterm.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/ghostty-web.js",
-      "require": "./dist/ghostty-web.umd.cjs"
+      "types": "./dist/ntwebterm.d.ts",
+      "import": "./dist/ntwebterm.js",
+      "require": "./dist/ntwebterm.umd.cjs"
     },
     "./ghostty-vt.wasm": "./ghostty-vt.wasm"
   },
@@ -33,12 +33,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/coder/ghostty-web.git"
+    "url": "https://github.com/NimbleTerminal/ntwebterm.git"
   },
-  "bugs": "https://github.com/coder/ghostty-web/issues",
-  "homepage": "https://github.com/coder/ghostty-web#readme",
+  "bugs": "https://github.com/NimbleTerminal/ntwebterm/issues",
+  "homepage": "https://github.com/NimbleTerminal/ntwebterm#readme",
   "license": "MIT",
-  "author": "Coder",
+  "author": "NimbleTerminal and Coder",
   "publishConfig": {
     "access": "public"
   },

@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "@cmux/ghostty-terminal",
+      "name": "ntwebterm",
       "dependencies": {
         "bidi-js": "^1.0.3",
         "fast-png": "^7.0.0",

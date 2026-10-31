@@ -861,7 +861,7 @@ export class WebGPURenderer implements Renderer {
 
     this.device.lost.then((info) => {
       if (this.destroyed) return;
-      console.error('[ghostty-web] GPUDevice lost:', info.reason, info.message);
+      console.error('[ntwebterm] GPUDevice lost:', info.reason, info.message);
       // Task 17 wires this to the Terminal-level fallback.
       for (const fn of this.deviceLostListeners) fn(info);
     });

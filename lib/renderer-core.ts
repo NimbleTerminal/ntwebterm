@@ -99,7 +99,7 @@ export function parseHexColor(hex: string): [number, number, number] {
   if (!m) {
     if (!warnedUnparseableColors.has(hex)) {
       warnedUnparseableColors.add(hex);
-      console.warn('[ghostty-web] unparseable theme color, falling back to black:', hex);
+      console.warn('[ntwebterm] unparseable theme color, falling back to black:', hex);
     }
     return [0, 0, 0];
   }

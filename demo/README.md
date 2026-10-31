@@ -1,11 +1,14 @@
-# @ghostty-web/demo
+# @ntwebterm/demo
 
-Cross-platform demo server for [ghostty-web](https://github.com/coder/ghostty-web) terminal emulator.
+Cross-platform demo server for [ntwebterm](https://github.com/NimbleTerminal/ntwebterm) terminal emulator.
 
 ## Quick Start
 
+This demo is private and runs from a checkout. Build the parent project, then
+run `cd demo && bun install` before starting it.
+
 ```bash
-npx @ghostty-web/demo@next
+bun run start
 ```
 
 This starts a local web server with a fully functional terminal connected to your shell.
@@ -23,10 +26,10 @@ Works on **Linux** and **macOS** (no Windows support yet).
 
 ```bash
 # Default (port 8080)
-npx @ghostty-web/demo@next
+bun run start
 
 # Custom port
-PORT=3000 npx @ghostty-web/demo@next
+PORT=3000 bun run start
 ```
 
 Then open http://localhost:8080 in your browser.
@@ -45,7 +48,7 @@ This means the WebSocket connection automatically adapts to use the same protoco
 
 ```bash
 # Start the demo server
-npx @ghostty-web/demo@next
+bun run start
 
 # In another terminal, expose it via ngrok
 ngrok http 8080

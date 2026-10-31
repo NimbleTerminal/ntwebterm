@@ -6,7 +6,7 @@ import { DEFAULT_FONT_FAMILY, loadFontFaces } from './fonts';
  *
  * Usage:
  * ```typescript
- * import { init, Terminal } from 'ghostty-web';
+ * import { init, Terminal } from 'ntwebterm';
  *
  * await init();
  * const term = new Terminal();
@@ -248,7 +248,7 @@ export class Terminal implements ITerminalCore {
 
       case 'theme':
         if (this.renderer) {
-          console.warn('ghostty-web: theme changes after open() are not yet fully supported');
+          console.warn('ntwebterm: theme changes after open() are not yet fully supported');
         }
         break;
 
@@ -690,7 +690,7 @@ export class Terminal implements ITerminalCore {
         if (this.isSwapping) return;
         this.isSwapping = true;
         try {
-          console.warn(`[ghostty-web] renderer falling back to ${target}:`, reason);
+          console.warn(`[ntwebterm] renderer falling back to ${target}:`, reason);
 
           // Tear down the old renderer's GPU resources and the SelectionManager
           // (which holds canvas-attached event listeners on the old canvas).
@@ -715,7 +715,7 @@ export class Terminal implements ITerminalCore {
             });
           } catch (e) {
             // If the requested target also fails, drop straight to Canvas2D.
-            console.warn(`[ghostty-web] ${target} fallback failed; using canvas2d:`, e);
+            console.warn(`[ntwebterm] ${target} fallback failed; using canvas2d:`, e);
             this.renderer = await pickRenderer('canvas2d', this.canvas, {
               fontSize: this.options.fontSize,
               fontFamily: this.options.fontFamily,

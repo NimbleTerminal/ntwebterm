@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * @ghostty-web/demo - Cross-platform demo server
+ * @ntwebterm/demo - Cross-platform demo server
  *
  * Starts a local HTTP server with WebSocket PTY support.
- * Run with: npx @ghostty-web/demo
+ * Run with: cd demo && bun run start
  */
 
 import fs from 'fs';
@@ -30,7 +30,7 @@ const DEV_MODE = process.argv.includes('--dev');
 const HTTP_PORT = process.env.PORT || (DEV_MODE ? 8000 : 8080);
 
 // ============================================================================
-// Locate ghostty-web assets
+// Locate ntwebterm assets
 // ============================================================================
 
 import { createRequire } from 'module';
@@ -51,29 +51,29 @@ function findGhosttyWeb() {
 
   // First, check for local development (repo root dist/)
   const localDist = path.join(__dirname, '..', '..', 'dist');
-  const localJs = path.join(localDist, 'ghostty-web.js');
+  const localJs = path.join(localDist, 'ntwebterm.js');
   const localWasm = path.join(__dirname, '..', '..', 'ghostty-vt.wasm');
 
   if (fs.existsSync(localJs) && fs.existsSync(localWasm)) {
     return { distPath: localDist, wasmPath: localWasm, repoRoot: path.join(__dirname, '..', '..') };
   }
 
-  // Use require.resolve to find the installed ghostty-web package
+  // Use require.resolve to find the installed ntwebterm package
   try {
-    const ghosttyWebMain = require.resolve('ghostty-web');
+    const ghosttyWebMain = require.resolve('ntwebterm');
     // Strip dist/... from path to get package root (regex already gives us the root)
     const ghosttyWebRoot = ghosttyWebMain.replace(/[/\\]dist[/\\].*$/, '');
     const distPath = path.join(ghosttyWebRoot, 'dist');
     const wasmPath = path.join(ghosttyWebRoot, 'ghostty-vt.wasm');
 
-    if (fs.existsSync(path.join(distPath, 'ghostty-web.js')) && fs.existsSync(wasmPath)) {
+    if (fs.existsSync(path.join(distPath, 'ntwebterm.js')) && fs.existsSync(wasmPath)) {
       return { distPath, wasmPath, repoRoot: null };
     }
   } catch (e) {
     // require.resolve failed, package not found
   }
 
-  console.error('Error: Could not find ghostty-web package.');
+  console.error('Error: Could not find ntwebterm package.');
   console.error('');
   console.error('If developing locally, run: bun run build');
   console.error('If using npx, the package should install automatically.');
@@ -91,7 +91,7 @@ const HTML_TEMPLATE = `<!doctype html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ghostty-web</title>
+    <title>ntwebterm</title>
     <style>
       * {
         margin: 0;
@@ -202,7 +202,7 @@ const HTML_TEMPLATE = `<!doctype html>
           <div class="light yellow"></div>
           <div class="light green"></div>
         </div>
-        <span class="title">ghostty-web</span>
+        <span class="title">ntwebterm</span>
         <div class="connection-status">
           <div class="status-dot connecting" id="status-dot"></div>
           <span id="status-text">Connecting...</span>
@@ -212,7 +212,7 @@ const HTML_TEMPLATE = `<!doctype html>
     </div>
 
     <script type="module">
-      import { init, Terminal, FitAddon } from '/dist/ghostty-web.js';
+      import { init, Terminal, FitAddon } from '/dist/ntwebterm.js';
 
       await init();
 
@@ -616,7 +616,7 @@ wss.on('connection', (ws, req) => {
   const R = '\x1b[0m'; // Reset
   ws.send(`${C}╔══════════════════════════════════════════════════════════════╗${R}\r\n`);
   ws.send(
-    `${C}║${R}  ${G}Welcome to ghostty-web!${R}                                     ${C}║${R}\r\n`
+    `${C}║${R}  ${G}Welcome to ntwebterm!${R}                                     ${C}║${R}\r\n`
   );
   ws.send(`${C}║${R}                                                              ${C}║${R}\r\n`);
   ws.send(`${C}║${R}  You have a real shell session with full PTY support.        ${C}║${R}\r\n`);
@@ -632,7 +632,7 @@ wss.on('connection', (ws, req) => {
 
 function printBanner(url) {
   console.log('\n' + '═'.repeat(60));
-  console.log('  🚀 ghostty-web demo server' + (DEV_MODE ? ' (dev mode)' : ''));
+  console.log('  🚀 ntwebterm demo server' + (DEV_MODE ? ' (dev mode)' : ''));
   console.log('═'.repeat(60));
   console.log(`\n  📺 Open: ${url}`);
   console.log(`  📡 WebSocket PTY: same endpoint /ws`);

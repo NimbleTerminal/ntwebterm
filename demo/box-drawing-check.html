@@ -23,7 +23,7 @@
     p.has('before')
       ? '/.vite/box-drawing/lib/index.ts'
       : p.has('bundled')
-        ? '/dist/ghostty-web.js'
+        ? '/dist/ntwebterm.js'
         : '/lib/index.ts'
   );
   const ghostty = await api.Ghostty.load('/ghostty-vt.wasm');

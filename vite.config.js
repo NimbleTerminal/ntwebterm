@@ -16,7 +16,7 @@ export default defineConfig({
       // API Extractor drops global augmentations during declaration rollup.
       // Keep the registry's source declaration in the published entry point.
       beforeWriteFile(filePath, content) {
-        if (filePath.endsWith('/index.d.ts')) {
+        if (filePath.endsWith('/index.d.ts') || filePath.endsWith('/ntwebterm.d.ts')) {
           return {
             content:
               content +
@@ -30,9 +30,9 @@ export default defineConfig({
   build: {
     lib: {
       entry: 'lib/index.ts',
-      name: 'GhosttyWeb',
+      name: 'NTWebTerm',
       fileName: (format) => {
-        return format === 'es' ? 'ghostty-web.js' : 'ghostty-web.umd.cjs';
+        return format === 'es' ? 'ntwebterm.js' : 'ntwebterm.umd.cjs';
       },
       formats: ['es', 'umd'],
     },

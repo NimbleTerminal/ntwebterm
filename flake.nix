@@ -1,5 +1,5 @@
 {
-  description = "ghostty-web - Web terminal using Ghostty's VT100 parser via WASM";
+  description = "ntwebterm - Web terminal using Ghostty's VT100 parser via WASM";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -26,7 +26,7 @@
         };
 
         packages.default = pkgs.stdenv.mkDerivation {
-          pname = "ghostty-web";
+          pname = "ntwebterm";
           version = "0.3.0";
 
           src = ./.;

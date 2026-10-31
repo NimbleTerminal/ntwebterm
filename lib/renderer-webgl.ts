@@ -340,7 +340,7 @@ export class GLGlyphAtlas extends GlyphAtlasBase {
   protected growTexture(newSize: number): void {
     const newTex = this.createBackingTexture(newSize);
     if (!newTex) {
-      console.warn('[ghostty-web] GLGlyphAtlas: grow() failed; keeping existing atlas');
+      console.warn('[ntwebterm] GLGlyphAtlas: grow() failed; keeping existing atlas');
       return;
     }
     this.gl.deleteTexture?.(this.texture);
@@ -549,7 +549,7 @@ export class WebGL2Renderer implements Renderer {
       if (this.destroyed) return;
       e.preventDefault();
       const info = { reason: 'webglcontextlost' };
-      console.error('[ghostty-web] WebGL context lost');
+      console.error('[ntwebterm] WebGL context lost');
       for (const fn of this.contextLostListeners) fn(info);
     });
   }

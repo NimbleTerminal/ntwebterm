@@ -1,5 +1,5 @@
 /**
- * Test Helpers for ghostty-web
+ * Test Helpers for ntwebterm
  *
  * Provides utilities for test isolation and setup.
  */

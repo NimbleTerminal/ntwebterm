@@ -1,34 +1,15 @@
-# ghostty-web
+# ntwebterm
 
-[![NPM Version](https://img.shields.io/npm/v/ghostty-web)](https://npmjs.com/package/ghostty-web) [![NPM Downloads](https://img.shields.io/npm/dw/ghostty-web)](https://npmjs.com/package/ghostty-web) [![npm bundle size](https://img.shields.io/bundlephobia/minzip/ghostty-web)](https://npmjs.com/package/ghostty-web) [![license](https://img.shields.io/github/license/coder/ghostty-web)](./LICENSE)
+Ghostty’s terminal emulator in the browser, with an xterm.js-compatible API, WebGPU, WebGL and Canvas2D renderers, and Kitty graphics.
 
-[Ghostty](https://github.com/ghostty-org/ghostty) for the web with [xterm.js](https://github.com/xtermjs/xterm.js) API compatibility — giving you a proper VT100 implementation in the browser.
-
-- Migrate from xterm by changing your import: `@xterm/xterm` → `ghostty-web`
-- WASM-compiled parser from Ghostty—the same code that runs the native app
-- ~940 KiB WASM bundle
-
-Originally created for [Mux](https://github.com/coder/mux) (a desktop app for isolated, parallel agentic development), but designed to be used anywhere.
-
-## Try It
-
-- [Live Demo](https://ghostty.ondis.co) on an ephemeral VM (thank you to Greg from [disco.cloud](https://disco.cloud) for hosting).
-
-- On your computer:
-
-  ```bash
-  npx @ghostty-web/demo@next
-  ```
-
-  This starts a local HTTP server with a real shell on `http://localhost:8080`. Works best on Linux and macOS.
-
-![ghostty](https://github.com/user-attachments/assets/aceee7eb-d57b-4d89-ac3d-ee1885d0187a)
+Part of the NimbleTerminal family; formerly NimbleMarkets’ ghostty-web fork.
+The browser layer originated in [Coder’s ghostty-web](https://github.com/coder/ghostty-web).
 
 ## Comparison with xterm.js
 
 xterm.js is everywhere—VS Code, Hyper, countless web terminals. But it has fundamental issues:
 
-| Issue                                    | xterm.js                                                         | ghostty-web                |
+| Issue                                    | xterm.js                                                         | ntwebterm                  |
 | ---------------------------------------- | ---------------------------------------------------------------- | -------------------------- |
 | **Complex scripts** (Devanagari, Arabic) | Rendering issues                                                 | ✓ Proper grapheme handling |
 | **XTPUSHSGR/XTPOPSGR**                   | [Not supported](https://github.com/xtermjs/xterm.js/issues/2570) | ✓ Full support             |
@@ -38,15 +19,19 @@ xterm.js reimplements terminal emulation in JavaScript. Every escape sequence, e
 ## Installation
 
 ```bash
-npm install ghostty-web
+git clone --branch built https://github.com/NimbleTerminal/ntwebterm.git
 ```
+
+The `built` branch carries `dist/ntwebterm.js`, `dist/ntwebterm.d.ts`,
+and `ghostty-vt.wasm`. Serve the runtime files together. npm publishing is
+disabled until the new package is configured; the examples use its future package name.
 
 ## Usage
 
-ghostty-web aims to be API-compatible with the xterm.js API.
+ntwebterm aims to be API-compatible with the xterm.js API.
 
 ```javascript
-import { init, Terminal } from 'ghostty-web';
+import { init, Terminal } from 'ntwebterm';
 
 await init();
 
@@ -106,6 +91,11 @@ implement Unicode Bidirectional Algorithm 13.0. Characters assigned after
 Unicode 13 may therefore have outdated BiDi classifications. Matching Unicode
 15.1 requires those tables to be updated upstream in `bidi-js`.
 
+## Extensions
+
+- **OSC 7501:** structured program status, exposed through `onProgramStatus`.
+- **Cell-anchored overlay addon / OSC 7502:** planned, not included in 0.4.0.
+
 ### Program status (OSC 7501)
 
 Subscribe to structured program-status reports from applications:
@@ -118,7 +108,7 @@ const subscription = term.onProgramStatus((report) => {
 subscription.dispose();
 ```
 
-`ProgramStatusReport` is exported from `ghostty-web`. Its `state` is `idle`,
+`ProgramStatusReport` is exported from `ntwebterm`. Its `state` is `idle`,
 `working`, `done`, `blocked`, `error`, or `clear`; `kind` is `permission`,
 `question`, `auth`, or `null`. Progress is a percentage or `null`. The `id`,
 `app`, `title`, and `message` fields are strings; title and message are already
@@ -143,7 +133,7 @@ Rebuilding requires Zig **0.17.0**; use
 
 Compared with our previous October 6 pin (`a4aacd918`), this release brings:
 
-| Change                                                                                           | Availability in ghostty-web                                                                                                                                                                       |
+| Change                                                                                           | Availability in ntwebterm                                                                                                                                                                         |
 | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | OSC 7501 revision 0.4: capability lists in support replies, stricter record IDs                  | Active through `onProgramStatus`; the host owns ancestor `app` inheritance.                                                                                                                       |
 | CSI 19 t screen-size reports and DECXCPR extended cursor reports                                 | Handled by WASM through existing response routing. CSI 19 t uses the text-area dimensions.                                                                                                        |
@@ -173,7 +163,7 @@ with click-to-cycle and `Alt+Shift+R` cycling between renderers. Useful for
 demos and during development; opt-in.
 
 ```javascript
-import { init, Terminal, installRendererHud, parseRendererFromURL } from 'ghostty-web';
+import { init, Terminal, installRendererHud, parseRendererFromURL } from 'ntwebterm';
 
 await init();
 const term = new Terminal({ renderer: parseRendererFromURL() });
@@ -230,10 +220,12 @@ they discard before writing the command.
 
 Ship the matching JavaScript bundle and `ghostty-vt.wasm` together. This registry
 is a browser convention; it does not create operating-system shared memory.
+The global name is preserved for compatibility. Moving it behind an option or
+addon is future work.
 
 ## Development
 
-ghostty-web builds from Ghostty's source with a [patch](./patches/ghostty-wasm-api.patch) to expose additional
+ntwebterm builds from Ghostty's source with a [patch](./patches/ghostty-wasm-api.patch) to expose additional
 functionality.
 
 > Requires Zig and Bun.
@@ -246,7 +238,37 @@ Mitchell Hashimoto (author of Ghostty) has [been working](https://mitchellh.com/
 
 This library will eventually consume a native Ghostty WASM distribution once available, and will continue to provide an xterm.js compatible API.
 
-At Coder we're big fans of Ghostty, so kudos to that team for all the amazing work.
+Credit to [Ghostty](https://github.com/ghostty-org/ghostty) and its contributors for
+the emulator, and [Coder](https://github.com/coder/ghostty-web) for the original
+browser wrapper. NimbleTerminal develops this browser layer independently.
+
+## Repository and releases
+
+The full source history from `NimbleMarkets/ghostty-web` is preserved here,
+including Coder’s commits. We pushed to the already-created empty repository
+instead of transferring the fork: issues and the fork relationship remain at
+[the original repository](https://github.com/NimbleMarkets/ghostty-web).
+`main` continues `nm-kitty-meow` at `547ae5c`. Merged development branches are
+preserved as `archive/*` tags; `built` is the only artifact branch. The
+`build-artifacts` workflow rebuilds it on main pushes, daily, or on demand.
+Consumers pin its commit, and must ship JavaScript and WASM from the same build.
+Coder’s existing `v0.4.0` tag is preserved as `archive/coder-v0.4.0`; ntwebterm’s
+`v0.4.0` identifies this rename. npm publishing is disabled until configured.
+
+Booba’s next minor release serves `static/ntwebterm/ntwebterm.js` and keeps
+`static/ghostty-web/ghostty-web.js` as a re-export for that minor release.
+Consumers should update imports with their booba dependency bump; the alias is
+scheduled for removal in the following release. This includes gloss,
+ntfilepicker, nt3d, ntmaps, and thinkt. The overlay addon is subsequent work.
+
+### Ghostty naming
+
+Ghostty’s [project documentation](https://ghostty.org/docs/about) encourages
+other terminals built on libghostty. A review of its README, CONTRIBUTING,
+PACKAGING, and website documentation on 2026-10-31 did not locate a specific
+published derivative-name policy. We do not claim naming approval: ntwebterm
+uses its own product name and credits Ghostty as its emulator, with no implied
+affiliation. Ghostty core identifiers and `ghostty-vt.wasm` retain their names.
 
 ## License
 

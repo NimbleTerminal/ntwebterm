@@ -1,3 +1,10 @@
+# 0.4.0: renamed from the ghostty-web fork
+
+- Rename the browser package and bundles to ntwebterm, preserving the xterm.js-compatible API and Ghostty core names.
+- WebGPU and WebGL renderers alongside Canvas2D; Kitty graphics layers, placeholders, animation, and browser shared memory.
+- Bidirectional and RTL text, OSC 7501 program status, continuous box drawing, and the input fixes from coder/ghostty-web#145.
+- Preserve Coder history and MIT attribution. Source lives on main; built contains generated distribution files. npm publishing is disabled pending ntwebterm setup.
+
 # Changelog
 
 ## Unreleased
