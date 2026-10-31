@@ -1,5 +1,5 @@
 /**
- * Public API for @cmux/ghostty-terminal
+ * Public API for ntwebterm
  *
  * Main entry point following xterm.js conventions
  */
