@@ -1,13 +1,27 @@
-# 0.4.0: renamed from the ghostty-web fork
+# Changelog
+
+## 0.4.1
+
+### Fixed
+
+- Sanitize bracketed paste payloads and avoid sending an extra Ctrl+V byte before browser paste. Restrict clickable links to safe URL schemes.
+- Fix terminal open/dispose races, reset-time selection handling, and leaked DOM listeners.
+- Preserve scrollback position during writes, clamp it on resize, and correctly expose scrollback graphemes, wrapped lines, and normal/alternate buffers.
+- Wire Ghostty callbacks for synchronized output, bells, and title changes; preserve pure black palette colors and distinct OSC 8 link IDs.
+- Correct keyboard modifier, repeat, and key-release encoding, mouse hover/motion reporting, and alternate-screen wheel handling.
+- Fix offscreen cursors, smooth scrolling, HiDPI glyph atlases, atlas growth, blinking text, block elements, and wide-character cursor rendering across the renderers.
+- Release failed WebGPU devices and report actual rendered frame rates in the HUD.
+- Bind the demo server to loopback by default, validate WebSocket origins, block distribution path traversal, and repair the scrollbar demo.
+- Harden Zig downloads with checksum verification, use frozen dependency installs in CI, and support Nix source builds.
+
+## 0.4.0: renamed from the ghostty-web fork
 
 - Rename the browser package and bundles to ntwebterm, preserving the xterm.js-compatible API and Ghostty core names.
 - WebGPU and WebGL renderers alongside Canvas2D; Kitty graphics layers, placeholders, animation, and browser shared memory.
 - Bidirectional and RTL text, OSC 7501 program status, continuous box drawing, and the input fixes from coder/ghostty-web#145.
 - Preserve Coder history and MIT attribution. Source lives on main; built contains generated distribution files. npm publishing is disabled pending ntwebterm setup.
 
-# Changelog
-
-## Unreleased
+### Included changes
 
 ### Fixed
 
@@ -36,6 +50,7 @@
 - Forward Ctrl+V and Cmd+V to the application as 0x16 before the browser's
   paste event, so a program that reads the clipboard itself, for an image
   paste, sees the key; text paste is unchanged (coder/ghostty-web#145).
+  Superseded in 0.4.1: browser paste no longer emits the extra 0x16 byte.
 
 - Follow DECSCUSR cursor shape changes from the application at runtime. The
   configured `cursorStyle` stays until the program asks for a bar, block or
