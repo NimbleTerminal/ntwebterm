@@ -1,9 +1,27 @@
-# ntwebterm
+# ntwebterm — Ghostty terminal emulator for the browser
+
+[![CI](https://github.com/NimbleTerminal/ntwebterm/actions/workflows/ci.yml/badge.svg)](https://github.com/NimbleTerminal/ntwebterm/actions/workflows/ci.yml)
+[![Build artifacts](https://github.com/NimbleTerminal/ntwebterm/actions/workflows/build.yml/badge.svg)](https://github.com/NimbleTerminal/ntwebterm/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Live demos](https://img.shields.io/badge/demos-live-4baaaa.svg)](https://nimbleterminal.github.io/ntwebterm/)
 
 Ghostty’s terminal emulator in the browser, with an xterm.js-compatible API, WebGPU, WebGL and Canvas2D renderers, and Kitty graphics.
 
-Part of the NimbleTerminal family; formerly NimbleMarkets’ ghostty-web fork.
+Part of the [Nimble Terminal](https://nimbleterminal.dev) family; formerly NimbleMarkets’ ghostty-web fork.
 The browser layer originated in [Coder’s ghostty-web](https://github.com/coder/ghostty-web).
+
+**[Try the live demos →](https://nimbleterminal.github.io/ntwebterm/)**
+
+[Multilingual & BiDi](https://nimbleterminal.github.io/ntwebterm/?demo=multilingual) ·
+[Colors & Styles](https://nimbleterminal.github.io/ntwebterm/?demo=colors) ·
+[Box Drawing](https://nimbleterminal.github.io/ntwebterm/?demo=boxes) ·
+[Kitty Graphics](https://nimbleterminal.github.io/ntwebterm/?demo=kitty) ·
+[Scrollback & Input](https://nimbleterminal.github.io/ntwebterm/?demo=scrollback)
+
+[![Multilingual terminal rendering with Arabic, Hebrew, CJK, Indic scripts, emoji, and Kitty graphics](./bench/results/multilingual/webgpu-20-1.png)](https://nimbleterminal.github.io/ntwebterm/?demo=multilingual)
+
+_Browser screenshot from the [multilingual renderer checks](./bench/results/multilingual/README.md), using WebGPU at 20 px._
+The hosted demos run entirely in your browser. For a real shell session, see the [local PTY demo](./demo/README.md).
 
 ## Comparison with xterm.js
 
@@ -48,7 +66,45 @@ term.onData((data) => websocket.send(data));
 websocket.onmessage = (e) => term.write(e.data);
 ```
 
-For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
+For a comprehensive client <-> server example, refer to the [PTY demo source](./demo/index.html).
+
+### Fonts and display scaling
+
+The default size is 15 CSS pixels. The default family is
+`"JetBrains Mono", "Cascadia Code", "Iosevka", "Source Code Pro", "ui-monospace", "SF Mono", Menlo, Consolas, monospace`.
+Installed fonts determine which face is selected; no font is downloaded by default.
+Existing `fontFamily` and `fontSize` overrides continue to work.
+
+For predictable selection, serve an OFL JetBrains Mono WOFF2 asset with your app:
+
+```typescript
+const term = new Terminal({
+  fontFamily: '"JetBrains Mono", monospace',
+  fontFaces: [
+    {
+      family: 'JetBrains Mono',
+      src: '/fonts/JetBrainsMono-Regular.woff2',
+      weight: 400,
+      style: 'normal',
+      display: 'swap',
+    },
+  ],
+});
+await term.open(container);
+```
+
+Copy the font and its OFL license into your public assets first.
+`fontFaces` accepts URL strings, CSS `url(...)` or `local(...)` sources, or an
+array of sources in fallback order. Configure it before `open()`. Initial
+measurement and paint wait for loading, up to three seconds. Failed or timed-out
+faces fall back to the family stack; timed-out loads are not registered later.
+Remote assets must permit cross-origin font loading.
+
+Cell width and height round up to integer CSS pixels. Fractional DPR still
+produces fractional device-pixel cell boundaries: renderers scale the backing
+canvas while retaining the CSS grid. Font size, family, and display DPR changes
+refresh metrics. `term.getFontMetrics()` returns cell width, height, baseline,
+unrounded `advanceWidth`, `ascent`, and `descent` after opening.
 
 ### Renderers
 
@@ -245,10 +301,6 @@ Mitchell Hashimoto (author of Ghostty) has [been working](https://mitchellh.com/
 
 This library will eventually consume a native Ghostty WASM distribution once available, and will continue to provide an xterm.js compatible API.
 
-Credit to [Ghostty](https://github.com/ghostty-org/ghostty) and its contributors for
-the emulator, and [Coder](https://github.com/coder/ghostty-web) for the original
-browser wrapper. NimbleTerminal develops this browser layer independently.
-
 ## Repository and releases
 
 The full source history from `NimbleMarkets/ghostty-web` is preserved here,
@@ -277,44 +329,23 @@ published derivative-name policy. We do not claim naming approval: ntwebterm
 uses its own product name and credits Ghostty as its emulator, with no implied
 affiliation. Ghostty core identifiers and `ghostty-vt.wasm` retain their names.
 
+## Open Collaboration
+
+Contributions and feedback are welcome.
+[Report an issue](https://github.com/NimbleTerminal/ntwebterm/issues) or
+[submit a pull request](https://github.com/NimbleTerminal/ntwebterm/pulls).
+See [AGENTS.md](./AGENTS.md) for development workflows and required checks.
+
+## Acknowledgements
+
+Thank you to [Ghostty](https://github.com/ghostty-org/ghostty) and its contributors
+for the terminal emulator, and to [Coder](https://github.com/coder/ghostty-web)
+for the original browser wrapper. Nimble Terminal develops this browser layer independently.
+
 ## License
 
-[MIT](./LICENSE)
+[MIT License](./LICENSE). Copyright (c) 2025 Coder and (c) 2026 Neomantra Corp.
 
-### Fonts and display scaling
+---
 
-The default size is 15 CSS pixels. The default family is
-`"JetBrains Mono", "Cascadia Code", "Iosevka", "Source Code Pro", "ui-monospace", "SF Mono", Menlo, Consolas, monospace`.
-Installed fonts determine which face is selected; no font is downloaded by default.
-Existing `fontFamily` and `fontSize` overrides continue to work.
-
-For predictable selection, serve an OFL JetBrains Mono WOFF2 asset with your app:
-
-```typescript
-const term = new Terminal({
-  fontFamily: '"JetBrains Mono", monospace',
-  fontFaces: [
-    {
-      family: 'JetBrains Mono',
-      src: '/fonts/JetBrainsMono-Regular.woff2',
-      weight: 400,
-      style: 'normal',
-      display: 'swap',
-    },
-  ],
-});
-await term.open(container);
-```
-
-Copy the font and its OFL license into your public assets first.
-`fontFaces` accepts URL strings, CSS `url(...)` or `local(...)` sources, or an
-array of sources in fallback order. Configure it before `open()`. Initial
-measurement and paint wait for loading, up to three seconds. Failed or timed-out
-faces fall back to the family stack; timed-out loads are not registered later.
-Remote assets must permit cross-origin font loading.
-
-Cell width and height round up to integer CSS pixels. Fractional DPR still
-produces fractional device-pixel cell boundaries: renderers scale the backing
-canvas while retaining the CSS grid. Font size, family, and display DPR changes
-refresh metrics. `term.getFontMetrics()` returns cell width, height, baseline,
-unrounded `advanceWidth`, `ascent`, and `descent` after opening.
+Made with :heart: and :fire: by the team behind [Nimble Terminal](https://nimbleterminal.dev).
