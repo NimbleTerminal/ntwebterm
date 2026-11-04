@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ntwebterm · Ghostty VT100 terminal in the browser</title>
+    <link rel="stylesheet" href="site.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="./"
+        >ntwebterm<span
+          >Ghostty VT100 terminal in the browser · WebGPU, WebGL2 &amp; Canvas2D</span
+        ></a
+      >
+      <a href="https://github.com/NimbleTerminal/ntwebterm">Source ↗</a>
+    </header>
+    <main>
+      <nav aria-label="Examples">
+        <a href="?demo=multilingual" data-demo="multilingual">
+          <strong>Multilingual &amp; BiDi</strong>
+          <span
+            >19 scripts, UBA bidirectional reordering, contextual shaped runs, wide CJK, emoji, and
+            bundled Noto fonts.</span
+          >
+        </a>
+        <a href="?demo=colors" data-demo="colors">
+          <strong>Colors &amp; Styles</strong>
+          <span
+            >16-color ANSI, 256-color cube, 24-bit RGB gradients, SGR text attributes, and OSC 8
+            links.</span
+          >
+        </a>
+        <a href="?demo=boxes" data-demo="boxes">
+          <strong>Box Drawing &amp; Blocks</strong>
+          <span
+            >Pixel-snapped procedural box drawing, junctions, fractional block elements, and
+            sparklines.</span
+          >
+        </a>
+        <a href="?demo=kitty" data-demo="kitty">
+          <strong>Kitty Graphics</strong>
+          <span
+            >Inline RGBA placements and Unicode virtual placeholders across under-bg, under-text,
+            and over-text z-layers.</span
+          >
+        </a>
+        <a href="?demo=scrollback" data-demo="scrollback">
+          <strong>Scrollback &amp; Input</strong>
+          <span
+            >Scrollback history, overlay scrollbar, wheel/touch scrolling, selection, and an
+            interactive local prompt.</span
+          >
+        </a>
+      </nav>
+      <section class="demo" aria-label="Live terminal example">
+        <div class="toolbar">
+          <h1 id="title">Multilingual &amp; BiDi</h1>
+          <div class="toolbar-actions">
+            <span class="renderer-group" role="group" aria-label="Renderer backend">
+              <span class="renderer-label">Renderer:</span>
+              <a href="?renderer=auto" data-renderer="auto">Auto</a>
+              <a href="?renderer=webgpu" data-renderer="webgpu">WebGPU</a>
+              <a href="?renderer=webgl" data-renderer="webgl">WebGL2</a>
+              <a href="?renderer=canvas2d" data-renderer="canvas2d">Canvas2D</a>
+            </span>
+            <span class="sep">·</span>
+            <a id="restart" href="?demo=multilingual">Restart ↻</a>
+          </div>
+        </div>
+        <div class="terminal-frame">
+          <div id="terminal"></div>
+        </div>
+        <p id="status" role="status">Starting terminal…</p>
+        <p id="help">
+          Select text with the mouse · Click the top-right HUD badge or press Alt+Shift+R to cycle
+          renderers.
+        </p>
+      </section>
+    </main>
+    <footer>
+      <span
+        >Powered by <a href="https://github.com/ghostty-org/ghostty">libghostty-vt</a>.
+        <a href="LICENSE">MIT License</a> ·
+        <a href="https://github.com/NimbleTerminal/booba">booba (Go TUIs) ↗</a></span
+      >
+      <span class="credit"
+        >Made with ♥ and 🔥 by <a href="https://nimbleterminal.dev">Nimble Terminal</a></span
+      >
+    </footer>
+    <script type="module" src="site.js"></script>
+  </body>
+</html>
