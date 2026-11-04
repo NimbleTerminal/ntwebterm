@@ -1,5 +1,6 @@
 import { drawBoxDrawing } from './box-drawing';
 import { DEFAULT_FONT_FAMILY } from './fonts';
+import { type ShapedRunCell, createShapedRunLayout, rasterizeShapedRun } from './shaping';
 /**
  * Canvas Renderer for Terminal Display
  *
@@ -202,6 +203,7 @@ export class CanvasRenderer implements Renderer {
    * through every helper. Set at the top of render(), cleared at the end.
    */
   private currentRenderBuffer: IRenderable | null = null;
+  private shapedRunCache = new Map<string, HTMLCanvasElement>();
 
   /** @internal Test-only accessor for kittyDamagedRows. Not part of the public API. */
   public _testGetKittyDamagedRows(): ReadonlySet<number> {
@@ -313,7 +315,41 @@ export class CanvasRenderer implements Renderer {
   public remeasureFont(): void {
     this.devicePixelRatio = window.devicePixelRatio || 1;
     this.metrics = this.measureFont();
+    this.shapedRunCache.clear();
     this.invalidateNext = true;
+  }
+
+  private getShapedRunCanvas(shaped: ShapedRunCell, color: string): HTMLCanvasElement {
+    const { run } = shaped;
+    const key = `${this.fontSize}|${this.fontFamily}|${this.devicePixelRatio}|${this.metrics.width}|${this.metrics.height}|${this.metrics.baseline}|${run.styleBits}|${color}|${run.text}`;
+    const cached = this.shapedRunCache.get(key);
+    if (cached) return cached;
+
+    const cellW = Math.max(1, Math.round(this.metrics.width * this.devicePixelRatio));
+    const cellH = Math.max(1, Math.round(this.metrics.height * this.devicePixelRatio));
+    const canvas = document.createElement('canvas');
+    canvas.width = cellW * run.length;
+    canvas.height = cellH;
+    const ctx = canvas.getContext('2d')!;
+    ctx.save();
+    ctx.scale(this.devicePixelRatio, this.devicePixelRatio);
+    rasterizeShapedRun(
+      ctx,
+      run,
+      this.fontSize,
+      this.fontFamily,
+      this.metrics.baseline,
+      canvas.width / this.devicePixelRatio
+    );
+    ctx.restore();
+    ctx.globalCompositeOperation = 'source-in';
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    this.shapedRunCache.set(key, canvas);
+    if (this.shapedRunCache.size > 256) {
+      this.shapedRunCache.delete(this.shapedRunCache.keys().next().value!);
+    }
+    return canvas;
   }
 
   // ==========================================================================
@@ -767,6 +803,7 @@ export class CanvasRenderer implements Renderer {
 
     const map = this.bidiMapper?.getMap(line) ?? null;
     const reorder = map !== null && !map.isIdentity;
+    const shapedCells = map ? createShapedRunLayout(line, map).cells : null;
 
     this.renderImageLayer(0, y);
 
@@ -788,7 +825,15 @@ export class CanvasRenderer implements Renderer {
       const lx = reorder ? map!.visualToLogical[x]! : x;
       const cell = line[lx]!;
       if (cell.width === 0) continue; // Skip spacer cells for wide characters
-      this.renderCellText(cell, x, y, undefined, reorder ? map!.mirror?.get(lx) : undefined, lx);
+      this.renderCellText(
+        cell,
+        x,
+        y,
+        undefined,
+        reorder ? map!.mirror?.get(lx) : undefined,
+        lx,
+        shapedCells?.get(lx)
+      );
     }
     this.renderImageLayer(2, y);
   }
@@ -849,7 +894,8 @@ export class CanvasRenderer implements Renderer {
     y: number,
     colorOverride?: string,
     mirrorCodepoint?: number,
-    lx?: number
+    lx?: number,
+    shaped?: ShapedRunCell
   ): void {
     // Link ranges are logical; `x` is the visual (pixel-positioning) column,
     // which under BiDi reordering differs from the cell's logical column.
@@ -940,7 +986,22 @@ export class CanvasRenderer implements Renderer {
     // image renderings (ansimage, pixterm) at dpr=1; native terminals
     // (Ghostty, kitty, alacritty) draw them programmatically for the same
     // reason. Only takes the fast path for simple (non-grapheme) cells.
-    if (
+    if (shaped) {
+      const canvas = this.getShapedRunCanvas(shaped, this.ctx.fillStyle as string);
+      const cellW = Math.max(1, Math.round(this.metrics.width * this.devicePixelRatio));
+      const cellH = Math.max(1, Math.round(this.metrics.height * this.devicePixelRatio));
+      this.ctx.drawImage(
+        canvas,
+        shaped.slice * cellW,
+        0,
+        cellW,
+        cellH,
+        cellX,
+        cellY,
+        this.metrics.width,
+        this.metrics.height
+      );
+    } else if (
       cell.grapheme_len === 0 &&
       (drawBoxDrawing(
         this.ctx,
@@ -1643,7 +1704,15 @@ export class CanvasRenderer implements Renderer {
                 leadX
               );
             } else {
-              this.renderCellText(line[x], vx, y, this.theme.cursorAccent, map?.mirror?.get(x), x);
+              this.renderCellText(
+                line[x],
+                vx,
+                y,
+                this.theme.cursorAccent,
+                map?.mirror?.get(x),
+                x,
+                map ? createShapedRunLayout(line, map).cells.get(x) : undefined
+              );
             }
             this.ctx.restore();
           }
@@ -1723,6 +1792,7 @@ export class CanvasRenderer implements Renderer {
   public setFontSize(size: number): void {
     this.fontSize = size;
     this.metrics = this.measureFont();
+    this.shapedRunCache.clear();
     this.invalidateNext = true;
     this.onRequestRender?.();
   }
@@ -1733,6 +1803,7 @@ export class CanvasRenderer implements Renderer {
   public setFontFamily(family: string): void {
     this.fontFamily = family;
     this.metrics = this.measureFont();
+    this.shapedRunCache.clear();
     this.invalidateNext = true;
     this.onRequestRender?.();
   }

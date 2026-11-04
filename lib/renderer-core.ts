@@ -13,6 +13,7 @@ import type { ITheme } from './interfaces';
 import { KITTY_PLACEHOLDER, diacriticToInt } from './kitty_diacritics';
 import type { FontMetrics, IRenderable, IScrollbackProvider, LinkRange } from './renderer-types';
 import type { SelectionManager } from './selection-manager';
+import { type ShapedRun, createShapedRunLayout, rasterizeShapedRun } from './shaping';
 import { CellFlags, KittyImageFormat } from './types';
 import type { GhosttyCell, KittyImagePixels, KittyPlacementInfo } from './types';
 
@@ -285,9 +286,9 @@ export function premultiplyAlpha(rgba: Uint8ClampedArray): void {
  * and offscreen Canvas2D rasterization. Subclasses provide the actual
  * GPU/GL texture and implement uploadRegion + growTexture.
  *
- * Cache key is `${widthInCells}|${styleBits}|${grapheme}`. Width-in-cells
- * is 1 for narrow glyphs and 2 for CJK / emoji; the slot is `cellW *
- * widthInCells` pixels wide.
+ * Cache keys distinguish ordinary glyphs from contextual shaped runs. Slots
+ * use `cellW * widthInCells` pixels: one or two cells for ordinary glyphs,
+ * and the full logical run length for a shaped run.
  *
  * Style bits: 0x1 = bold, 0x2 = italic. FAINT is intentionally excluded —
  * atlas always rasterizes at full alpha; shaders apply the 0.5 multiplier.
@@ -392,12 +393,28 @@ export abstract class GlyphAtlasBase {
     baseline: number,
     widthInCells: number = 1
   ): AtlasSlot {
-    const key = `${widthInCells}|${styleBits}|${grapheme}`;
+    return this.raster(grapheme, styleBits, baseline, widthInCells);
+  }
+
+  getOrRasterShapedRun(run: ShapedRun, baseline: number): AtlasSlot | null {
+    if (this.cellW * run.length > this.maxSize) return null;
+    return this.raster(run.text, run.styleBits, baseline, run.length, run);
+  }
+
+  private raster(
+    text: string,
+    styleBits: number,
+    baseline: number,
+    widthInCells: number,
+    shapedRun?: ShapedRun
+  ): AtlasSlot {
+    const key = `${shapedRun ? 'shaped' : 'glyph'}|${widthInCells}|${styleBits}|${text}`;
     const cached = this.cache.get(key);
     if (cached) return cached;
 
     const w = this.cellW * widthInCells;
     const h = this.cellH;
+    while (w > this.size && this.size < this.maxSize) this.grow();
     if (this.nextX + w > this.size) {
       this.nextX = 0;
       this.nextY += this.rowHeight;
@@ -411,35 +428,41 @@ export abstract class GlyphAtlasBase {
     if (h > this.rowHeight) this.rowHeight = h;
     this.cache.set(key, slot);
 
+    if (this.offscreen.width < w) this.offscreen.width = w;
+    if (this.offscreen.height !== h) this.offscreen.height = h;
     const ctx = this.offCtx;
     ctx.clearRect(0, 0, w, h);
     ctx.save();
     if (this.dpr !== 1 && typeof ctx.scale === 'function') {
       ctx.scale(this.dpr, this.dpr);
     }
-    let style = '';
-    if (styleBits & 1) style += 'bold ';
-    if (styleBits & 2) style += 'italic ';
-    ctx.font = `${style}${this.fontSize}px ${this.fontFamily}`;
-    ctx.textBaseline = 'alphabetic';
-    ctx.textAlign = 'left';
-    // Always full alpha. FAINT is applied in the shader as a 0.5 mask multiplier
-    // rather than baked into the rasterization, so faint and non-faint glyphs
-    // share the same atlas slot (the cache key drops the FAINT bit too).
-    ctx.fillStyle = '#ffffff';
     const cssW = w / this.dpr;
     const cssH = h / this.dpr;
-    if (!drawBoxDrawing(ctx, grapheme, 0, 0, cssW, cssH, this.fontSize)) {
-      let drawX = 0;
-      if (typeof ctx.measureText === 'function') {
-        const m = ctx.measureText(grapheme);
-        const leftBearing = m?.actualBoundingBoxLeft ?? 0;
-        if (leftBearing > 0) {
-          const rightExtent = m?.actualBoundingBoxRight ?? m?.width ?? 0;
-          drawX = Math.min(leftBearing, Math.max(0, cssW - rightExtent));
+    if (shapedRun) {
+      rasterizeShapedRun(ctx, shapedRun, this.fontSize, this.fontFamily, baseline, cssW);
+    } else {
+      let style = '';
+      if (styleBits & 1) style += 'bold ';
+      if (styleBits & 2) style += 'italic ';
+      ctx.font = `${style}${this.fontSize}px ${this.fontFamily}`;
+      ctx.textBaseline = 'alphabetic';
+      ctx.textAlign = 'left';
+      // Always full alpha. FAINT is applied in the shader as a 0.5 mask multiplier
+      // rather than baked into the rasterization, so faint and non-faint glyphs
+      // share the same atlas slot (the cache key drops the FAINT bit too).
+      ctx.fillStyle = '#ffffff';
+      if (!drawBoxDrawing(ctx, text, 0, 0, cssW, cssH, this.fontSize)) {
+        let drawX = 0;
+        if (typeof ctx.measureText === 'function') {
+          const m = ctx.measureText(text);
+          const leftBearing = m?.actualBoundingBoxLeft ?? 0;
+          if (leftBearing > 0) {
+            const rightExtent = m?.actualBoundingBoxRight ?? m?.width ?? 0;
+            drawX = Math.min(leftBearing, Math.max(0, cssW - rightExtent));
+          }
         }
+        ctx.fillText(text, drawX, baseline);
       }
-      ctx.fillText(grapheme, drawX, baseline);
     }
     ctx.restore();
 
@@ -620,6 +643,7 @@ export function encodeCells(
 
       const bidiMap = ctx.bidiMapper && line ? ctx.bidiMapper.getMap(line) : null;
       const reorder = bidiMap !== null && !bidiMap.isIdentity;
+      const shapedCells = bidiMap && line ? createShapedRunLayout(line, bidiMap).cells : null;
 
       let pendingRightHalf: {
         slotU: number;
@@ -719,6 +743,10 @@ export function encodeCells(
         const skipAtlas =
           (flags & (FLAG_INVISIBLE | FLAG_IS_KITTY_PLACEHOLDER | FLAG_IS_BLOCK_ELEMENT)) !== 0;
         if (!skipAtlas && ctx.atlas) {
+          const shaped = shapedCells?.get(lx);
+          const shapedSlot = shaped
+            ? ctx.atlas.getOrRasterShapedRun(shaped.run, ctx.metrics.baseline)
+            : null;
           const extras = c.grapheme;
           const mirroredCp = reorder ? bidiMap!.mirror?.get(lx) : undefined;
           const baseCp = mirroredCp ?? (c.codepoint || 32);
@@ -727,20 +755,19 @@ export function encodeCells(
               ? String.fromCodePoint(baseCp, ...extras)
               : String.fromCodePoint(baseCp);
           const styleBits = (flags & FLAG_BOLD ? 1 : 0) | (flags & FLAG_ITALIC ? 2 : 0);
-          const widthInCells = c.width === 2 ? 2 : 1;
-          const slot = ctx.atlas.getOrRaster(
-            grapheme,
-            styleBits,
-            ctx.metrics.baseline,
-            widthInCells
-          );
+          const widthInCells = shapedSlot ? 1 : c.width === 2 ? 2 : 1;
+          const slot =
+            shapedSlot ??
+            ctx.atlas.getOrRaster(grapheme, styleBits, ctx.metrics.baseline, widthInCells);
           if (slot.color) flags |= FLAG_COLOR_GLYPH;
+          const sliceW = shapedSlot && shaped ? shapedSlot.w / shaped.run.length : slot.w;
+          const slotU = shapedSlot && shaped ? shapedSlot.u + shaped.slice * sliceW : slot.u;
           const halfSlotW = Math.max(1, slot.w >> 1);
-          arr[i + 2] = (slot.u & 0xffff) | ((slot.v & 0xffff) << 16);
+          arr[i + 2] = (slotU & 0xffff) | ((slot.v & 0xffff) << 16);
           arr[i + 3] =
             widthInCells === 2
               ? (halfSlotW & 0xffff) | ((slot.h & 0xffff) << 16)
-              : (slot.w & 0xffff) | ((slot.h & 0xffff) << 16);
+              : (sliceW & 0xffff) | ((slot.h & 0xffff) << 16);
           if (widthInCells === 2) {
             pendingRightHalf = {
               slotU: slot.u,

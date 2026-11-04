@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Shape cursive-joining scripts (such as Arabic) as contextual runs across Canvas2D, WebGL, and WebGPU while preserving terminal-cell selection, cursor, color, and BiDi behavior.
+- Add a bundled-font multilingual browser corpus with semantic checks and renderer/DPR screenshot goldens.
+
 ## 0.4.1
 
 ### Fixed

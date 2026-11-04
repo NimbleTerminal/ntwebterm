@@ -94,3 +94,15 @@ The demo selects a renderer via the `?renderer=` query string:
 
 Press **Alt+Shift+R** to cycle through all three backends (webgpu → webgl → canvas2d → webgpu), reloading the page with the new `?renderer=` query string.
 The FPS overlay in the top-right of the terminal shows the active backend.
+
+## Multilingual renderer check
+
+With the Vite dev server running, open
+`http://localhost:8000/demo/multilingual-renderer-check.html`. Use
+`?renderer=canvas2d`, `?renderer=webgl`, or `?renderer=webgpu`, and optionally
+`&size=20`, to inspect individual configurations. The page reports buffer,
+width, grapheme and selection checks below the terminal. Arabic words are
+shaped as contextual runs while retaining their terminal-cell geometry.
+
+The Chromium screenshot matrix and bundled test-font instructions are in
+`bench/results/multilingual/README.md`.

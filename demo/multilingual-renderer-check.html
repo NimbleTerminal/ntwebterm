@@ -1,0 +1,163 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Multilingual renderer checks</title>
+    <style>
+      body {
+        background: #eee;
+        color: #222;
+        font: 14px system-ui;
+        margin: 24px;
+      }
+      #terminal {
+        width: max-content;
+      }
+      #terminal canvas {
+        display: block;
+      }
+      #status {
+        white-space: pre-wrap;
+      }
+      .probe {
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Multilingual renderer checks</h1>
+    <p>
+      Arabic words are shaped as contextual runs while retaining their terminal-cell geometry. Every
+      row should preserve the source text and match the approved browser golden.
+    </p>
+    <div id="terminal"></div>
+    <pre id="status">Loading…</pre>
+    <div id="probes"></div>
+    <script type="module">
+      import {
+        MULTILINGUAL_ROWS,
+        TEST_FONT_FAMILY,
+        TEST_FONT_FACES,
+      } from './multilingual-corpus.js';
+
+      const status = document.querySelector('#status');
+      try {
+        const params = new URLSearchParams(location.search);
+        const api = await import(
+          /* @vite-ignore */ params.has('bundled') ? '/dist/ntwebterm.js' : '/lib/index.ts'
+        );
+        const ghostty = await api.Ghostty.load('/ghostty-vt.wasm');
+        const fontSize = +(params.get('size') || 16);
+        const cols = 80;
+        const term = new api.Terminal({
+          ghostty,
+          cols,
+          rows: MULTILINGUAL_ROWS.length + 1,
+          fontFamily: TEST_FONT_FAMILY,
+          fontFaces: TEST_FONT_FACES,
+          fontSize,
+          renderer: params.get('renderer') || 'canvas2d',
+          cursorBlink: false,
+          theme: { foreground: '#ffffff', background: '#000000' },
+        });
+        await term.open(document.querySelector('#terminal'));
+        term.write('\x1b[?25l');
+        for (const row of MULTILINGUAL_ROWS) {
+          if (row.kitty) {
+            term.write('\x1b_Ga=T,f=32,s=1,v=1,i=1,c=8,r=1,C=1,z=-1;/wAA/w==\x1b\\');
+          }
+          term.write(row.text + '\r\n');
+        }
+        await document.fonts.ready;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+        const checks = MULTILINGUAL_ROWS.map((row, index) => {
+          const actual = term.buffer.active.getLine(index)?.translateToString(true) ?? '';
+          return {
+            name: `buffer:${row.id}`,
+            passed: actual === row.text,
+            expected: row.text,
+            actual,
+          };
+        });
+
+        const widthRow = MULTILINGUAL_ROWS.findIndex(({ id }) => id === 'width');
+        const widthCells = term.wasmTerm
+          .getViewport()
+          .slice(widthRow * cols, (widthRow + 1) * cols);
+        const wideText = widthCells
+          .filter(({ width }) => width === 2)
+          .map(({ codepoint }) => String.fromCodePoint(codepoint))
+          .join('');
+        checks.push({
+          name: 'wide-cells',
+          passed:
+            wideText === '漢字絵한' && widthCells.filter(({ width }) => width === 0).length === 4,
+          actual: wideText,
+        });
+
+        term.select(7, widthRow, 4);
+        checks.push({
+          name: 'cjk-selection',
+          passed: term.getSelection() === '漢字',
+          actual: term.getSelection(),
+        });
+        term.clearSelection();
+
+        const combiningRow = MULTILINGUAL_ROWS.findIndex(({ id }) => id === 'combining');
+        term.select(11, combiningRow, 1);
+        checks.push({
+          name: 'combining-selection',
+          passed: term.getSelection() === 'e\u0301',
+          actual: term.getSelection(),
+        });
+        term.clearSelection();
+
+        const hebrewRow = MULTILINGUAL_ROWS.findIndex(({ id }) => id === 'hebrew');
+        term.select(8, hebrewRow, 4);
+        checks.push({
+          name: 'rtl-selection',
+          passed: term.getSelection() === 'שלום',
+          actual: term.getSelection(),
+        });
+        term.clearSelection();
+        term.renderer.invalidate();
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+
+        const probes = document.querySelector('#probes');
+        for (const row of MULTILINGUAL_ROWS) {
+          const probe = document.createElement('div');
+          probe.id = `probe-${row.id}`;
+          probe.className = 'probe';
+          probe.textContent = row.text;
+          probe.style.font = `${fontSize}px ${TEST_FONT_FAMILY}`;
+          probes.append(probe);
+        }
+        await document.fonts.ready;
+
+        const knownFailures = MULTILINGUAL_ROWS.filter(({ knownFailure }) => knownFailure).map(
+          ({ id, knownFailure }) => ({ id, reason: knownFailure })
+        );
+        const result = {
+          passed: checks.every(({ passed }) => passed),
+          backend: term.renderer.constructor.name,
+          fontFamily: TEST_FONT_FAMILY,
+          fontSize,
+          dpr: devicePixelRatio,
+          metrics: term.renderer.getMetrics(),
+          fonts: TEST_FONT_FACES.map(({ family }) => ({
+            family,
+            loaded: document.fonts.check(`${fontSize}px ${JSON.stringify(family)}`),
+          })),
+          checks,
+          knownFailures,
+        };
+        status.textContent = JSON.stringify(result, null, 2);
+        window.result = result;
+      } catch (error) {
+        status.textContent = error.stack ?? String(error);
+        window.result = { passed: false, error: status.textContent };
+      }
+    </script>
+  </body>
+</html>

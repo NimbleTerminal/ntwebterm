@@ -91,6 +91,13 @@ implement Unicode Bidirectional Algorithm 13.0. Characters assigned after
 Unicode 13 may therefore have outdated BiDi classifications. Matching Unicode
 15.1 requires those tables to be updated upstream in `bidi-js`.
 
+A real-browser multilingual check covers representative Latin, Greek, Cyrillic,
+CJK, Indic, Southeast Asian, RTL, combining-mark and emoji text across all three
+renderers. Arabic words use contextual run shaping while preserving terminal
+cell geometry. The check also covers Kitty image compositing. Open
+`demo/multilingual-renderer-check.html` through
+the Vite server, or see [the browser-test instructions](./bench/results/multilingual/README.md).
+
 ## Extensions
 
 - **OSC 7501:** structured program status, exposed through `onProgramStatus`.

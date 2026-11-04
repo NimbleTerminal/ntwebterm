@@ -605,6 +605,48 @@ describe('encodeCells: bidi reordering', () => {
     encodeCells(cellArray, buffer, 0, undefined, { ...baseCtx, atlas: atlas as any });
     expect(rastered).toEqual(['ג', '(', 'ב', ')', 'א']);
   });
+
+  test('shaped runs share one raster and retain per-cell cursor and selection state', () => {
+    const cells = [...'مرحبا'].map((char) => makeCell({ codepoint: char.codePointAt(0)! }));
+    const buffer = makeStubBuffer({
+      cols: 5,
+      rows: 1,
+      cells,
+      placements: [],
+      cursor: { x: 0, y: 0, visible: true },
+    });
+    const runTexts: string[] = [];
+    const atlas = {
+      getOrRasterShapedRun(run: { text: string }) {
+        runTexts.push(run.text);
+        return { u: 100, v: 20, w: 40, h: 16 };
+      },
+      getOrRaster() {
+        throw new Error('Shaped run cells must not raster independently');
+      },
+    };
+    const selectionManager = {
+      getSelectionCoords: () => ({ startCol: 0, startRow: 0, endCol: 0, endRow: 0 }),
+      getSelectionColumnSpace: () => 'logical',
+    };
+    const cellArray = new Uint32Array(cells.length * CELL_U32S);
+    encodeCells(cellArray, buffer, 0, undefined, {
+      ...baseCtx,
+      atlas: atlas as any,
+      selectionManager: selectionManager as any,
+      cursorBlinkVisible: true,
+    });
+
+    expect(runTexts).toEqual(Array(5).fill('مرحبا'));
+    expect(cellArray[0 * CELL_U32S + 2]! & 0xffff).toBe(100);
+    expect(cellArray[4 * CELL_U32S + 2]! & 0xffff).toBe(132);
+    for (let x = 0; x < 5; x++) {
+      expect(cellArray[x * CELL_U32S + 3]! & 0xffff).toBe(8);
+    }
+    expect(cellArray[4 * CELL_U32S + 4]! & FLAG_IS_SELECTED).toBeTruthy();
+    expect(cellArray[4 * CELL_U32S + 4]! & FLAG_IS_CURSOR_CELL).toBeTruthy();
+    expect(cellArray[0 * CELL_U32S + 4]! & FLAG_IS_SELECTED).toBeFalsy();
+  });
 });
 
 describe('KittyTextureCacheBase', () => {
