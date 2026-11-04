@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.2
+
+### Added
 
 - Shape cursive-joining scripts (such as Arabic) as contextual runs across Canvas2D, WebGL, and WebGPU while preserving terminal-cell selection, cursor, color, and BiDi behavior.
 - Add a bundled-font multilingual browser corpus with semantic checks and renderer/DPR screenshot goldens.
+- Add a GitHub Pages browser showcase (`web/`) with interactive multilingual/BiDi, truecolor/SGR, box-drawing/block-element, Kitty graphics, and scrollback/input demos.
+- Add `Taskfile.yml` with `task ci` pre-flight and Pages build/serve targets.
 
 ## 0.4.1
 
