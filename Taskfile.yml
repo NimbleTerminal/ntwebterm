@@ -1,0 +1,142 @@
+# ntwebterm - Copyright (c) 2026 Neomantra Corp.
+
+version: '3'
+
+tasks:
+  default:
+    desc: 'Default task runs "test" and "build"'
+    cmds:
+      - task: test
+      - task: build
+
+  list:
+    desc: 'List available tasks'
+    cmds:
+      - task --list-all
+
+  ci:
+    desc: 'Run full local pre-flight CI checks (fmt, lint, typecheck, build, test, pages)'
+    cmds:
+      - task: fmt-check
+      - task: lint
+      - task: typecheck
+      - task: build
+      - |
+        SIZE=$(wc -c < ghostty-vt.wasm | tr -d ' ')
+        echo "WASM size: ${SIZE} bytes"
+        if [ "$SIZE" -gt 1048576 ]; then
+          echo "Error: ghostty-vt.wasm exceeds 1 MiB limit (${SIZE} bytes)" >&2
+          exit 1
+        fi
+      - task: test
+      - task: build:pages
+      - node --check web/site.js
+      - git --no-pager diff --check HEAD
+
+  install:
+    desc: 'Install dependencies with frozen lockfile'
+    cmds:
+      - bun install --frozen-lockfile
+
+  dev:
+    desc: 'Start Vite dev server on http://localhost:8000 (Pages showcase at /web/)'
+    cmds:
+      - bun run dev {{.CLI_ARGS}}
+
+  demo:
+    desc: 'Start production HTTP + WebSocket PTY demo server on http://localhost:8080'
+    cmds:
+      - bun run demo
+
+  demo:dev:
+    desc: 'Start Vite + WebSocket PTY demo server on http://localhost:8000/demo/'
+    cmds:
+      - bun --cwd demo install
+      - bun run demo:dev
+
+  build:
+    desc: 'Build ghostty-vt.wasm and dist/ library bundle'
+    cmds:
+      - bun run build
+      - rm -rf ghostty/zig-pkg ghostty/.zig-cache ghostty/zig-out
+
+  build:wasm:
+    desc: 'Build ghostty-vt.wasm from the Ghostty submodule (requires Zig 0.17.x)'
+    cmds:
+      - bun run build:wasm
+      - rm -rf ghostty/zig-pkg ghostty/.zig-cache ghostty/zig-out
+
+  build:lib:
+    desc: 'Build TypeScript library bundle and declarations into dist/'
+    cmds:
+      - bun run build:lib
+      - bun run build:wasm-copy
+
+  build:pages:
+    aliases: [site]
+    desc: 'Assemble the static GitHub Pages showcase into dist/pages/'
+    cmds:
+      - |
+        if [ ! -f dist/ntwebterm.js ] || [ ! -f dist/ghostty-vt.wasm ]; then
+          bun run build
+          rm -rf ghostty/zig-pkg ghostty/.zig-cache ghostty/zig-out
+        fi
+      - bun run build:pages
+
+  serve-pages:
+    aliases: [site-serve, pages:serve]
+    desc: 'Build and serve the static GitHub Pages site at http://localhost:8000'
+    deps: [build:pages]
+    cmds:
+      - python3 -m http.server 8000 --bind 127.0.0.1 --directory dist/pages
+
+  fmt:
+    desc: 'Format repository files with Prettier'
+    cmds:
+      - bun run fmt:fix
+
+  fmt-check:
+    desc: 'Check formatting with Prettier without modifying files'
+    cmds:
+      - bun run fmt
+
+  lint:
+    desc: 'Run Biome linter'
+    cmds:
+      - bun run lint
+
+  lint:fix:
+    desc: 'Run Biome linter and apply safe fixes'
+    cmds:
+      - bun run lint:fix
+
+  typecheck:
+    desc: 'Run TypeScript type checking'
+    cmds:
+      - bun run typecheck
+
+  test:
+    desc: 'Run unit test suite with Bun'
+    cmds:
+      - bun test {{.CLI_ARGS}}
+
+  test:multilingual:
+    desc: 'Run headless Chrome multilingual renderer and screenshot checks (requires Vite on :8000)'
+    cmds:
+      - bun run test:multilingual
+
+  test:multilingual:update:
+    desc: 'Update multilingual renderer golden screenshots and metadata'
+    cmds:
+      - bun run test:multilingual:update
+
+  fonts:multilingual:
+    desc: 'Fetch subsetted Noto test fonts and licenses for the multilingual corpus'
+    cmds:
+      - bun run fonts:multilingual
+
+  clean:
+    desc: 'Remove generated build outputs and Zig cache directories'
+    cmds:
+      - bun run clean
+      - rm -rf ghostty/zig-pkg ghostty/.zig-cache ghostty/zig-out
