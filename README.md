@@ -157,7 +157,50 @@ the Vite server, or see [the browser-test instructions](./bench/results/multilin
 ## Extensions
 
 - **OSC 7501:** structured program status, exposed through `onProgramStatus`.
+- **Program effects:** OSC 52 clipboard, OSC 7 working directory, OSC 9/777
+  notifications, OSC 9;4 progress, OSC 133 shell integration, CSI 8 t resize
+  requests and CSI ? 996 n color-scheme queries, parsed by libghostty-vt and
+  exposed as events (see below).
 - **Cell-anchored overlay addon / OSC 7502:** planned, not included in 0.4.0.
+
+### Program effects (clipboard, pwd, notifications, prompts)
+
+libghostty-vt parses these sequences; ntwebterm only adds the browser-facing
+action and an event the host can hook. Events fire after the `write()` that
+carried the sequence returns, so listeners may write or dispose freely.
+
+| Sequence                         | Default behavior                                           | Event / option                                                       |
+| -------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| OSC 52 / 5522 clipboard write    | Copies the text to the browser clipboard                   | `onClipboardWrite`; `clipboardWrite: 'browser' \| 'event' \| 'deny'` |
+| OSC 52 `?` / 5522 clipboard read | Refused, so programs can never read the clipboard silently | `clipboardRead: (request) => string \| null` (synchronous)           |
+| OSC 7 / 9;9 / 1337 CurrentDir    | Stored; nothing else                                       | `onPwdChange`, `term.pwd`                                            |
+| OSC 9 / OSC 777 notification     | Nothing is shown                                           | `onNotification`; `forwardNotificationsToBrowser()`                  |
+| OSC 9;4 progress                 | Nothing is drawn                                           | `onProgress`                                                         |
+| OSC 133 shell integration        | Nothing                                                    | `onSemanticPrompt`                                                   |
+| CSI 8 ; rows ; cols t            | The terminal is not resized                                | `onResizeRequest`                                                    |
+| CSI ? 996 n color scheme         | Answered from `theme.background` luminance                 | `colorScheme: 'auto' \| 'light' \| 'dark'`                           |
+
+```typescript
+import { Terminal, forwardNotificationsToBrowser } from 'ntwebterm';
+
+const term = new Terminal({
+  clipboardWrite: 'browser',
+  // Serve OSC 52 reads from a value the host controls; omit to refuse reads.
+  clipboardRead: (request) => (request.mimes.includes('text/plain') ? lastCopiedText : null),
+});
+term.onPwdChange((pwd) => updateTabTooltip(pwd));
+term.onSemanticPrompt((e) => {
+  if (e.kind === 'command-end' && e.exitCode) flashTab();
+});
+term.onResizeRequest(({ rows, cols }) => term.resize(cols || term.cols, rows || term.rows));
+// Reference implementation: show browser notifications when permission is granted.
+forwardNotificationsToBrowser(term, { requestPermission: false });
+```
+
+`clipboardRead` runs synchronously inside the VT stream, so it cannot await
+`navigator.clipboard.readText()`; it is meant for host-controlled values such as
+the text the host last copied. `forwardNotificationsToBrowser` never prompts
+unless `requestPermission: true` is passed, and even then it only asks once.
 
 ### Program status (OSC 7501)
 

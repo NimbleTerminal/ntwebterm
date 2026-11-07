@@ -4,6 +4,7 @@
 
 import type { Ghostty } from './ghostty';
 import type { RendererBackend } from './renderer-types';
+import type { ClipboardReadHandler, ColorScheme } from './types';
 
 export interface ITerminalOptions {
   cols?: number; // Default: 80
@@ -36,6 +37,23 @@ export interface ITerminalOptions {
 
   /** Renderer backend. 'auto' probes WebGPU, falls back to Canvas2D. Default: 'auto'. */
   renderer?: RendererBackend;
+
+  /**
+   * How OSC 52 / OSC 5522 clipboard writes from programs are handled.
+   * 'browser' (default) copies to the browser clipboard and fires
+   * onClipboardWrite; 'event' only fires the event; 'deny' refuses them.
+   */
+  clipboardWrite?: 'browser' | 'event' | 'deny';
+  /**
+   * Answers OSC 52 "?" / OSC 5522 clipboard reads synchronously. Reads are
+   * refused when unset, so programs can never read the clipboard silently.
+   */
+  clipboardRead?: ClipboardReadHandler | null;
+  /**
+   * Answer to CSI ? 996 n color scheme queries. 'auto' (default) derives it
+   * from the luminance of theme.background.
+   */
+  colorScheme?: 'auto' | ColorScheme;
 
   // Internal: Ghostty WASM instance (optional, for test isolation)
   // If not provided, uses the module-level instance from init()

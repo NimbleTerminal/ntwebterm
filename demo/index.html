@@ -131,7 +131,13 @@
     </div>
 
     <script type="module">
-      import { init, Terminal, installRendererHud, parseRendererFromURL } from '../lib/index.ts';
+      import {
+        init,
+        Terminal,
+        forwardNotificationsToBrowser,
+        installRendererHud,
+        parseRendererFromURL,
+      } from '../lib/index.ts';
       import { FitAddon } from '../lib/addons/fit.ts';
 
       let term;
@@ -205,6 +211,18 @@
             ws.send(data);
           }
         });
+
+        // libghostty-vt effect events. OSC 52 writes already go to the browser
+        // clipboard by default; the rest are the embedder's to act on. This demo
+        // mirrors them to the console and forwards notifications to the browser
+        // when the page already has permission (no prompt).
+        forwardNotificationsToBrowser(term);
+        term.onNotification((n) => console.log('notification:', n.title, n.body));
+        term.onPwdChange((pwd) => console.log('pwd:', pwd));
+        term.onProgress((p) => console.log('progress:', p.state, p.progress));
+        term.onSemanticPrompt((e) => console.log('prompt:', e.kind, e.exitCode ?? ''));
+        term.onResizeRequest((r) => console.log('resize request:', r.rows, 'x', r.cols));
+        term.onClipboardWrite((e) => console.log('clipboard write:', e.text));
 
         // Debug scrollback
         console.log('Terminal scrollback:', term.buffer?.scrollback?.length || 'N/A');

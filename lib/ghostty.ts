@@ -15,8 +15,14 @@ import {
   CellData,
   CellFlags,
   CellWide,
+  type ClipboardContent,
+  type ClipboardReadHandler,
+  type ClipboardWriteEvent,
+  type ClipboardWriteResult,
+  type ColorScheme,
   type Cursor,
   CursorVisualStyle,
+  type DesktopNotification,
   DirtyState,
   GHOSTTY_STYLE_BG_COLOR_OFFSET,
   GHOSTTY_STYLE_FG_COLOR_OFFSET,
@@ -39,6 +45,7 @@ import {
   type KittyPlacementInfo,
   PointTag,
   type ProgramStatusReport,
+  type ProgressReport,
   type RGB,
   type RenderStateColors,
   type RenderStateCursor,
@@ -46,8 +53,10 @@ import {
   RenderStateOption,
   RenderStateRowData,
   RenderStateRowOption,
+  type ResizeRequest,
   RowCellsData,
   RowData,
+  type SemanticPromptEvent,
   StyleFlag,
   SysOption,
   TerminalData,
@@ -57,8 +66,10 @@ import {
   packMode,
 } from './types';
 import {
+  type ColorSchemeCallback,
   type DecodePngCallback,
   type NotifyCallback,
+  type PayloadCallback,
   type ProgramStatusCallback,
   type ReadSharedMemoryCallback,
   type RenderHoldCallback,
@@ -406,6 +417,28 @@ export class GhosttyTerminal {
   private bellHandler?: () => void;
   private titleChangeHandler?: (title: string) => void;
   private renderHoldHandler?: (held: boolean) => void;
+
+  // libghostty-vt 1.0 effect callbacks. Payload callbacks are copied out
+  // inside the WASM callback and delivered after write() returns, like
+  // bells and title changes, so listeners may write, reset or dispose.
+  /** Decides a clipboard write synchronously, inside the WASM callback. */
+  private clipboardWritePolicy?: (event: ClipboardWriteEvent) => ClipboardWriteResult;
+  private clipboardWriteHandler?: (event: ClipboardWriteEvent) => void;
+  private pendingClipboardWrites: ClipboardWriteEvent[] = [];
+  /** Answers clipboard reads synchronously, inside the WASM callback. */
+  private clipboardReadHandler?: ClipboardReadHandler;
+  private pwdChangeHandler?: (pwd: string) => void;
+  private pendingPwdChanges: string[] = [];
+  private notificationHandler?: (notification: DesktopNotification) => void;
+  private pendingNotifications: DesktopNotification[] = [];
+  private progressHandler?: (report: ProgressReport) => void;
+  private pendingProgress: ProgressReport[] = [];
+  private semanticPromptHandler?: (event: SemanticPromptEvent) => void;
+  private pendingSemanticPrompts: SemanticPromptEvent[] = [];
+  private resizeRequestHandler?: (request: ResizeRequest) => void;
+  private pendingResizeRequests: ResizeRequest[] = [];
+  /** Answers CSI ? 996 n synchronously; undefined ignores the query. */
+  private colorSchemeProvider?: () => ColorScheme;
   private renderHeld = false;
   private hasCapturedHoldFrame = false;
   private hyperlinkIdsByUri = new Map<string, number>();
@@ -439,6 +472,61 @@ export class GhosttyTerminal {
     this.renderHoldHandler = handler;
   }
 
+  /**
+   * Decide OSC 52 / OSC 5522 clipboard writes. Runs inside the WASM callback,
+   * so it must not write to or dispose the terminal. Without a policy every
+   * write is denied. Events for accepted writes are delivered to the handler
+   * set with setClipboardWriteHandler() after the current write() returns.
+   */
+  setClipboardWritePolicy(policy?: (event: ClipboardWriteEvent) => ClipboardWriteResult): void {
+    this.clipboardWritePolicy = policy;
+  }
+
+  setClipboardWriteHandler(handler?: (event: ClipboardWriteEvent) => void): void {
+    this.clipboardWriteHandler = handler;
+  }
+
+  /**
+   * Answer OSC 52 "?" / OSC 5522 clipboard reads. The callback is only
+   * installed while a handler is set; without one upstream answers reads
+   * with an empty clipboard. Installing it also enables Kitty paste events
+   * (mode 5522) for programs that opt in.
+   */
+  setClipboardReadHandler(handler?: ClipboardReadHandler): void {
+    this.clipboardReadHandler = handler;
+    if (!this.callbackRegistry) return;
+    this.exports.ghostty_terminal_set(
+      this.handle,
+      TerminalOption.CLIPBOARD_READ,
+      handler ? this.callbackRegistry.clipboardReadIndex : 0
+    );
+  }
+
+  setPwdChangeHandler(handler?: (pwd: string) => void): void {
+    this.pwdChangeHandler = handler;
+  }
+
+  setNotificationHandler(handler?: (notification: DesktopNotification) => void): void {
+    this.notificationHandler = handler;
+  }
+
+  setProgressHandler(handler?: (report: ProgressReport) => void): void {
+    this.progressHandler = handler;
+  }
+
+  setSemanticPromptHandler(handler?: (event: SemanticPromptEvent) => void): void {
+    this.semanticPromptHandler = handler;
+  }
+
+  setResizeRequestHandler(handler?: (request: ResizeRequest) => void): void {
+    this.resizeRequestHandler = handler;
+  }
+
+  /** Answer CSI ? 996 n color scheme queries. Runs inside the WASM callback. */
+  setColorSchemeProvider(provider?: () => ColorScheme): void {
+    this.colorSchemeProvider = provider;
+  }
+
   isRenderHeld(): boolean {
     return this.renderHeld;
   }
@@ -453,10 +541,24 @@ export class GhosttyTerminal {
   }
 
   getTitle(): string {
+    return this.getStringData(TerminalData.TITLE);
+  }
+
+  /**
+   * The working directory the shell last reported (OSC 7, OSC 9;9 or
+   * OSC 1337 CurrentDir), as raw bytes: a file:// URI for OSC 7, usually a
+   * bare path otherwise. Empty when none was reported or it was cleared.
+   */
+  getPwd(): string {
+    return this.getStringData(TerminalData.PWD);
+  }
+
+  /** Read a GhosttyString-valued terminal_get key, copying it out of WASM memory. */
+  private getStringData(key: TerminalData): string {
     // GhosttyString is { ptr: u32, len: u32 } (8 bytes on wasm32)
     const strPtr = this.exports.ghostty_wasm_alloc(8);
     try {
-      const r = this.exports.ghostty_terminal_get(this.handle, TerminalData.TITLE, strPtr);
+      const r = this.exports.ghostty_terminal_get(this.handle, key, strPtr);
       if (r !== 0) return '';
       const view = new DataView(this.memory.buffer);
       const ptr = view.getUint32(strPtr, true);
@@ -523,6 +625,14 @@ export class GhosttyTerminal {
       bellIndex: number;
       titleChangedIndex: number;
       renderHoldIndex: number;
+      clipboardWriteIndex: number;
+      clipboardReadIndex: number;
+      pwdChangedIndex: number;
+      desktopNotificationIndex: number;
+      progressReportIndex: number;
+      semanticPromptIndex: number;
+      resizeWindowIndex: number;
+      colorSchemeIndex: number;
       instancesByHandle: Map<number, GhosttyTerminal>;
     }
   >();
@@ -540,6 +650,14 @@ export class GhosttyTerminal {
     bellIndex: number;
     titleChangedIndex: number;
     renderHoldIndex: number;
+    clipboardWriteIndex: number;
+    clipboardReadIndex: number;
+    pwdChangedIndex: number;
+    desktopNotificationIndex: number;
+    progressReportIndex: number;
+    semanticPromptIndex: number;
+    resizeWindowIndex: number;
+    colorSchemeIndex: number;
     instancesByHandle: Map<number, GhosttyTerminal>;
   };
 
@@ -908,6 +1026,40 @@ export class GhosttyTerminal {
     const reports = this.pendingProgramStatus;
     this.pendingProgramStatus = [];
     for (const report of reports) this.programStatusHandler?.(report);
+
+    const clipboardWrites = this.pendingClipboardWrites;
+    this.pendingClipboardWrites = [];
+    for (const event of clipboardWrites) this.clipboardWriteHandler?.(event);
+
+    const pwds = this.pendingPwdChanges;
+    this.pendingPwdChanges = [];
+    for (const pwd of pwds) this.pwdChangeHandler?.(pwd);
+
+    const notifications = this.pendingNotifications;
+    this.pendingNotifications = [];
+    for (const notification of notifications) this.notificationHandler?.(notification);
+
+    const progress = this.pendingProgress;
+    this.pendingProgress = [];
+    for (const report of progress) this.progressHandler?.(report);
+
+    const prompts = this.pendingSemanticPrompts;
+    this.pendingSemanticPrompts = [];
+    for (const event of prompts) this.semanticPromptHandler?.(event);
+
+    const resizes = this.pendingResizeRequests;
+    this.pendingResizeRequests = [];
+    for (const request of resizes) this.resizeRequestHandler?.(request);
+  }
+
+  /** Drop every deferred effect event (reset, free). */
+  private clearPendingEffects(): void {
+    this.pendingClipboardWrites = [];
+    this.pendingPwdChanges = [];
+    this.pendingNotifications = [];
+    this.pendingProgress = [];
+    this.pendingSemanticPrompts = [];
+    this.pendingResizeRequests = [];
   }
 
   /**
@@ -923,6 +1075,7 @@ export class GhosttyTerminal {
     this.pendingProgramStatus = [];
     this.pendingBells = 0;
     this.pendingTitleChanges = [];
+    this.clearPendingEffects();
     this.hyperlinkIdsByUri.clear();
     this.nextHyperlinkId = 1;
     this.imageEpoch++;
@@ -1223,6 +1376,7 @@ export class GhosttyTerminal {
     this.pendingProgramStatus = [];
     this.pendingBells = 0;
     this.pendingTitleChanges = [];
+    this.clearPendingEffects();
     this.renderHeld = false;
     this.hasCapturedHoldFrame = false;
     if (this.callbackRegistry) {
@@ -2408,51 +2562,242 @@ export class GhosttyTerminal {
         term.handleRenderHold(held !== 0);
       };
 
-      const {
-        writePtyFwd,
-        sizeFwd,
-        decodePngFwd,
-        readShmFwd,
-        programStatusFwd,
-        bellFwd,
-        titleChangedFwd,
-        renderHoldFwd,
-      } = makeCallbackTrampolines(
-        writePtyDispatch,
-        sizeDispatch,
-        decodePngDispatch,
-        readSharedMemoryDispatch,
-        programStatusDispatch,
-        bellDispatch,
-        titleChangedDispatch,
-        renderHoldDispatch
-      );
+      // ---- libghostty-vt 1.0 effect callbacks ----
+      // Shared decoders for borrowed payload structs. Strings are copied
+      // before the callback returns.
+      const utf8 = new TextDecoder();
+      const readString = (term: GhosttyTerminal, ptr: number): string => {
+        const view = new DataView(term.memory.buffer);
+        const dataPtr = view.getUint32(ptr, true);
+        const len = view.getUint32(ptr + 4, true);
+        if (dataPtr === 0 || len === 0) return '';
+        return utf8.decode(new Uint8Array(term.memory.buffer, dataPtr, len));
+      };
+      const readBytes = (term: GhosttyTerminal, ptr: number): Uint8Array => {
+        const view = new DataView(term.memory.buffer);
+        const dataPtr = view.getUint32(ptr, true);
+        const len = view.getUint32(ptr + 4, true);
+        if (dataPtr === 0 || len === 0) return new Uint8Array(0);
+        return new Uint8Array(term.memory.buffer, dataPtr, len).slice();
+      };
+      const locations = ['standard', 'selection', 'primary'] as const;
+      // Reply function pointers are table indices; call_indirect from JS.
+      const replyFn = (index: number): ((request: number, reply: number) => void) | null => {
+        const fn = index !== 0 ? table.get(index) : null;
+        return typeof fn === 'function' ? (fn as (request: number, reply: number) => void) : null;
+      };
+
+      // GhosttyClipboardWrite, wasm32 (32 bytes): location@0, contents@4,
+      // contents_len@8, name{ptr@12,len@16}, granted@20, can_remember@21,
+      // ctx@24, reply@28. GhosttyClipboardContent is 16 bytes:
+      // mime{ptr@0,len@4}, data{ptr@8,len@12}.
+      const clipboardWriteDispatch: PayloadCallback = (handle, _userdata, ptr) => {
+        const term = instancesByHandle.get(handle);
+        if (!term) return;
+        const view = new DataView(term.memory.buffer);
+        const contentsPtr = view.getUint32(ptr + 4, true);
+        const contentsLen = view.getUint32(ptr + 8, true);
+        const contents: ClipboardContent[] = [];
+        for (let i = 0; i < contentsLen; i++) {
+          const entry = contentsPtr + i * 16;
+          contents.push({ mime: readString(term, entry), data: readBytes(term, entry + 8) });
+        }
+        const textEntry = contents.find((c) => c.mime.startsWith('text/'));
+        const event: ClipboardWriteEvent = {
+          location: locations[view.getUint32(ptr, true)] ?? 'standard',
+          text: textEntry ? utf8.decode(textEntry.data) : null,
+          contents,
+          program: readString(term, ptr + 12),
+          granted: view.getUint8(ptr + 20) !== 0,
+        };
+        const decision = term.clipboardWritePolicy?.(event);
+        if (decision === undefined) return; // no policy: returning denies the write
+        const reply = replyFn(view.getUint32(ptr + 28, true));
+        if (!reply) return;
+        // GhosttyClipboardWriteReply (sized, 12 bytes): size@0, result@4, remember@8.
+        const replyPtr = term.exports.ghostty_wasm_alloc(12);
+        try {
+          const rv = new DataView(term.memory.buffer);
+          rv.setUint32(replyPtr, 12, true);
+          rv.setUint32(replyPtr + 4, { success: 0, denied: 1, unsupported: 2 }[decision], true);
+          rv.setUint8(replyPtr + 8, 0);
+          reply(ptr, replyPtr);
+        } finally {
+          term.exports.ghostty_wasm_free(replyPtr, 12);
+        }
+        if (decision === 'success') term.pendingClipboardWrites.push(event);
+      };
+
+      // GhosttyClipboardRead, wasm32 (36 bytes): location@0, mimes@4,
+      // mimes_len@8, list@12, name{ptr@16,len@20}, granted@24,
+      // can_remember@25, ctx@28, reply@32.
+      const clipboardReadDispatch: PayloadCallback = (handle, _userdata, ptr) => {
+        const term = instancesByHandle.get(handle);
+        if (!term || !term.clipboardReadHandler) return; // no reply: empty clipboard
+        const view = new DataView(term.memory.buffer);
+        const mimesPtr = view.getUint32(ptr + 4, true);
+        const mimesLen = view.getUint32(ptr + 8, true);
+        const mimes: string[] = [];
+        for (let i = 0; i < mimesLen; i++) mimes.push(readString(term, mimesPtr + i * 8));
+        const text = term.clipboardReadHandler({
+          location: locations[view.getUint32(ptr, true)] ?? 'standard',
+          mimes,
+          list: view.getUint8(ptr + 12) !== 0,
+          program: readString(term, ptr + 16),
+          granted: view.getUint8(ptr + 24) !== 0,
+        });
+        const reply = replyFn(view.getUint32(ptr + 32, true));
+        if (!reply) return;
+        // GhosttyClipboardReadReply (sized, 28 bytes): size@0, result@4,
+        // contents@8, contents_len@12, available@16, available_len@20,
+        // remember@24. One text/plain GhosttyClipboardContent on success.
+        const mime = new TextEncoder().encode('text/plain');
+        const data = text === null ? new Uint8Array(0) : new TextEncoder().encode(text);
+        const total = 28 + 16 + mime.length + data.length;
+        const buf = term.exports.ghostty_wasm_alloc(total);
+        try {
+          const mem = new Uint8Array(term.memory.buffer);
+          const rv = new DataView(term.memory.buffer);
+          const contentPtr = buf + 28;
+          const mimePtr = contentPtr + 16;
+          const dataPtr = mimePtr + mime.length;
+          mem.set(mime, mimePtr);
+          mem.set(data, dataPtr);
+          rv.setUint32(contentPtr, mimePtr, true);
+          rv.setUint32(contentPtr + 4, mime.length, true);
+          rv.setUint32(contentPtr + 8, dataPtr, true);
+          rv.setUint32(contentPtr + 12, data.length, true);
+          rv.setUint32(buf, 28, true);
+          rv.setUint32(buf + 4, text === null ? 1 /* DENIED */ : 0 /* SUCCESS */, true);
+          rv.setUint32(buf + 8, text === null ? 0 : contentPtr, true);
+          rv.setUint32(buf + 12, text === null ? 0 : 1, true);
+          rv.setUint32(buf + 16, 0, true);
+          rv.setUint32(buf + 20, 0, true);
+          rv.setUint8(buf + 24, 0);
+          reply(ptr, buf);
+        } finally {
+          term.exports.ghostty_wasm_free(buf, total);
+        }
+      };
+
+      const pwdChangedDispatch: NotifyCallback = (handle, _userdata) => {
+        const term = instancesByHandle.get(handle);
+        if (!term) return;
+        term.pendingPwdChanges.push(term.getPwd());
+      };
+
+      // GhosttyTerminalDesktopNotification (16 bytes): title{ptr@0,len@4}, body{ptr@8,len@12}.
+      const desktopNotificationDispatch: PayloadCallback = (handle, _userdata, ptr) => {
+        const term = instancesByHandle.get(handle);
+        if (!term) return;
+        term.pendingNotifications.push({
+          title: readString(term, ptr),
+          body: readString(term, ptr + 8),
+        });
+      };
+
+      // GhosttyTerminalProgressReport (8 bytes): state@0 (u32), progress@4 (i8, -1 = none).
+      const progressStates = ['remove', 'set', 'error', 'indeterminate', 'pause'] as const;
+      const progressReportDispatch: PayloadCallback = (handle, _userdata, ptr) => {
+        const term = instancesByHandle.get(handle);
+        if (!term) return;
+        const view = new DataView(term.memory.buffer);
+        const state = progressStates[view.getUint32(ptr, true)];
+        if (!state) return;
+        const progress = view.getInt8(ptr + 4);
+        term.pendingProgress.push({ state, progress: progress < 0 ? null : progress });
+      };
+
+      // GhosttyTerminalSemanticPrompt (32 bytes): kind@0, prompt_kind@4,
+      // has_exit_code@8, exit_code@12 (i32), command{ptr@16,len@20}, error{ptr@24,len@28}.
+      const promptKinds = [
+        undefined,
+        'prompt-start',
+        'input-start',
+        'output-start',
+        'command-end',
+      ] as const;
+      const promptPromptKinds = ['primary', 'right', 'continuation', 'secondary'] as const;
+      const semanticPromptDispatch: PayloadCallback = (handle, _userdata, ptr) => {
+        const term = instancesByHandle.get(handle);
+        if (!term) return;
+        const view = new DataView(term.memory.buffer);
+        const kind = promptKinds[view.getUint32(ptr, true)];
+        const promptKind = promptPromptKinds[view.getUint32(ptr + 4, true)];
+        if (!kind || !promptKind) return;
+        term.pendingSemanticPrompts.push({
+          kind,
+          promptKind,
+          exitCode: view.getUint8(ptr + 8) !== 0 ? view.getInt32(ptr + 12, true) : null,
+          command: readString(term, ptr + 16),
+          error: readString(term, ptr + 24),
+        });
+      };
+
+      // GhosttyTerminalResizeWindow: tag@0; value union @8 (u64-aligned):
+      // GRID is rows@8 (u16), columns@10 (u16). Unknown tags are ignored.
+      const resizeWindowDispatch: PayloadCallback = (handle, _userdata, ptr) => {
+        const term = instancesByHandle.get(handle);
+        if (!term) return;
+        const view = new DataView(term.memory.buffer);
+        if (view.getUint32(ptr, true) !== 0 /* GRID */) return;
+        term.pendingResizeRequests.push({
+          rows: view.getUint16(ptr + 8, true),
+          cols: view.getUint16(ptr + 10, true),
+        });
+      };
+
+      // COLOR_SCHEME: write GhosttyColorScheme (LIGHT=0, DARK=1) and return true.
+      const colorSchemeDispatch: ColorSchemeCallback = (handle, _userdata, outPtr) => {
+        const term = instancesByHandle.get(handle);
+        const scheme = term?.colorSchemeProvider?.();
+        if (!scheme) return 0;
+        new DataView(term!.memory.buffer).setUint32(outPtr, scheme === 'dark' ? 1 : 0, true);
+        return 1;
+      };
+
+      const fwd = makeCallbackTrampolines({
+        writePty: writePtyDispatch,
+        size: sizeDispatch,
+        decodePng: decodePngDispatch,
+        readShm: readSharedMemoryDispatch,
+        programStatus: programStatusDispatch,
+        bell: bellDispatch,
+        titleChanged: titleChangedDispatch,
+        renderHold: renderHoldDispatch,
+        clipboardWrite: clipboardWriteDispatch,
+        clipboardRead: clipboardReadDispatch,
+        pwdChanged: pwdChangedDispatch,
+        desktopNotification: desktopNotificationDispatch,
+        progressReport: progressReportDispatch,
+        semanticPrompt: semanticPromptDispatch,
+        resizeWindow: resizeWindowDispatch,
+        colorScheme: colorSchemeDispatch,
+      });
       // Grow once per slot, write each.
-      const writePtyIndex = table.grow(1);
-      table.set(writePtyIndex, writePtyFwd);
-      const sizeIndex = table.grow(1);
-      table.set(sizeIndex, sizeFwd);
-      const decodePngIndex = table.grow(1);
-      table.set(decodePngIndex, decodePngFwd);
-      const readShmIndex = table.grow(1);
-      table.set(readShmIndex, readShmFwd);
-      const programStatusIndex = table.grow(1);
-      table.set(programStatusIndex, programStatusFwd);
-      const bellIndex = table.grow(1);
-      table.set(bellIndex, bellFwd);
-      const titleChangedIndex = table.grow(1);
-      table.set(titleChangedIndex, titleChangedFwd);
-      const renderHoldIndex = table.grow(1);
-      table.set(renderHoldIndex, renderHoldFwd);
+      const slot = (fn: unknown): number => {
+        const index = table.grow(1);
+        // Funcrefs exported from the trampoline module are valid table values.
+        table.set(index, fn as Parameters<WebAssembly.Table['set']>[1]);
+        return index;
+      };
       registry = {
-        writePtyIndex,
-        sizeIndex,
-        decodePngIndex,
-        readShmIndex,
-        programStatusIndex,
-        bellIndex,
-        titleChangedIndex,
-        renderHoldIndex,
+        writePtyIndex: slot(fwd.writePty),
+        sizeIndex: slot(fwd.size),
+        decodePngIndex: slot(fwd.decodePng),
+        readShmIndex: slot(fwd.readShm),
+        programStatusIndex: slot(fwd.programStatus),
+        bellIndex: slot(fwd.bell),
+        titleChangedIndex: slot(fwd.titleChanged),
+        renderHoldIndex: slot(fwd.renderHold),
+        clipboardWriteIndex: slot(fwd.clipboardWrite),
+        clipboardReadIndex: slot(fwd.clipboardRead),
+        pwdChangedIndex: slot(fwd.pwdChanged),
+        desktopNotificationIndex: slot(fwd.desktopNotification),
+        progressReportIndex: slot(fwd.progressReport),
+        semanticPromptIndex: slot(fwd.semanticPrompt),
+        resizeWindowIndex: slot(fwd.resizeWindow),
+        colorSchemeIndex: slot(fwd.colorScheme),
         instancesByHandle,
       };
 
@@ -2460,8 +2805,11 @@ export class GhosttyTerminal {
       // is process/instance-global (not per-terminal) so we do it
       // exactly once per __indirect_function_table — same lifetime as
       // the trampoline registry itself.
-      this.exports.ghostty_sys_set(SysOption.DECODE_PNG, decodePngIndex);
-      const result = this.exports.ghostty_sys_set(SysOption.READ_SHARED_MEMORY, readShmIndex);
+      this.exports.ghostty_sys_set(SysOption.DECODE_PNG, registry.decodePngIndex);
+      const result = this.exports.ghostty_sys_set(
+        SysOption.READ_SHARED_MEMORY,
+        registry.readShmIndex
+      );
       if (result !== 0) throw new Error(`Installing Kitty shared memory failed: ${result}`);
       // Publish the capability only after the hook is installed successfully.
       globalThis.ghosttyKittySharedMemory ??= new Map<string, Uint8Array>();
@@ -2493,6 +2841,27 @@ export class GhosttyTerminal {
       TerminalOption.RENDER_HOLD,
       registry.renderHoldIndex
     );
+    // Effect callbacks that only observe (or, for clipboard writes, apply a
+    // policy that defaults to deny). CLIPBOARD_READ is installed lazily by
+    // setClipboardReadHandler() because its presence changes paste behavior.
+    for (const [option, index] of [
+      [TerminalOption.CLIPBOARD_WRITE, registry.clipboardWriteIndex],
+      [TerminalOption.PWD_CHANGED, registry.pwdChangedIndex],
+      [TerminalOption.DESKTOP_NOTIFICATION, registry.desktopNotificationIndex],
+      [TerminalOption.PROGRESS_REPORT, registry.progressReportIndex],
+      [TerminalOption.SEMANTIC_PROMPT, registry.semanticPromptIndex],
+      [TerminalOption.RESIZE_WINDOW, registry.resizeWindowIndex],
+      [TerminalOption.COLOR_SCHEME, registry.colorSchemeIndex],
+    ] as const) {
+      this.exports.ghostty_terminal_set(this.handle, option, index);
+    }
+    if (this.clipboardReadHandler) {
+      this.exports.ghostty_terminal_set(
+        this.handle,
+        TerminalOption.CLIPBOARD_READ,
+        registry.clipboardReadIndex
+      );
+    }
   }
 
   /**

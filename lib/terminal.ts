@@ -18,6 +18,7 @@ import { DEFAULT_FONT_FAMILY, loadFontFaces } from './fonts';
 
 import { RowBidiMapper } from './bidi';
 import { BufferNamespace } from './buffer';
+import { writeTextToClipboard } from './clipboard';
 import { EventEmitter } from './event-emitter';
 import type { Ghostty, GhosttyCell, GhosttyTerminal, GhosttyTerminalConfig } from './ghostty';
 import { getGhostty } from './index';
@@ -37,13 +38,24 @@ import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer-canvas2d';
+import { DEFAULT_THEME } from './renderer-core';
 import { pickRenderer } from './renderer-factory';
 import type { Renderer } from './renderer-types';
 import type { WebGL2Renderer } from './renderer-webgl';
 import type { WebGPURenderer } from './renderer-webgpu';
 import { ScrollbarOverlay } from './scrollbar-overlay';
 import { SelectionManager } from './selection-manager';
-import type { ILink, ILinkProvider, ProgramStatusReport } from './types';
+import type {
+  ClipboardWriteEvent,
+  ColorScheme,
+  DesktopNotification,
+  ILink,
+  ILinkProvider,
+  ProgramStatusReport,
+  ProgressReport,
+  ResizeRequest,
+  SemanticPromptEvent,
+} from './types';
 
 // ============================================================================
 // Terminal Class
@@ -132,6 +144,32 @@ export class Terminal implements ITerminalCore {
   }
 
   public readonly onTitleChange: IEvent<string> = this.titleChangeEmitter.event;
+
+  // libghostty-vt effect events. Each fires after the write() that carried
+  // the sequence returns, so listeners may write, reset or dispose.
+  private clipboardWriteEmitter = new EventEmitter<ClipboardWriteEvent>();
+  /** OSC 52 / OSC 5522 clipboard writes that were not denied (see options.clipboardWrite). */
+  public readonly onClipboardWrite: IEvent<ClipboardWriteEvent> = this.clipboardWriteEmitter.event;
+  private pwdChangeEmitter = new EventEmitter<string>();
+  /** OSC 7 / OSC 9;9 / OSC 1337 working-directory reports; see `pwd`. */
+  public readonly onPwdChange: IEvent<string> = this.pwdChangeEmitter.event;
+  private notificationEmitter = new EventEmitter<DesktopNotification>();
+  /** OSC 9 / OSC 777 desktop notifications. Nothing is shown unless the host acts. */
+  public readonly onNotification: IEvent<DesktopNotification> = this.notificationEmitter.event;
+  private progressEmitter = new EventEmitter<ProgressReport>();
+  /** OSC 9;4 progress reports. */
+  public readonly onProgress: IEvent<ProgressReport> = this.progressEmitter.event;
+  private semanticPromptEmitter = new EventEmitter<SemanticPromptEvent>();
+  /** OSC 133 shell-integration prompt and command events. */
+  public readonly onSemanticPrompt: IEvent<SemanticPromptEvent> = this.semanticPromptEmitter.event;
+  private resizeRequestEmitter = new EventEmitter<ResizeRequest>();
+  /** CSI 8 t window resize requests. The terminal is not resized unless the host does so. */
+  public readonly onResizeRequest: IEvent<ResizeRequest> = this.resizeRequestEmitter.event;
+
+  /** Working directory the shell last reported, raw (a file:// URI for OSC 7). Empty if none. */
+  get pwd(): string {
+    return this.wasmTerm?.getPwd() ?? '';
+  }
   public readonly onScroll: IEvent<number> = this.scrollEmitter.event;
   public readonly onRender: IEvent<{ start: number; end: number }> = this.renderEmitter.event;
   public readonly onCursorMove: IEvent<void> = this.cursorMoveEmitter.event;
@@ -205,6 +243,9 @@ export class Terminal implements ITerminalCore {
       disableStdin: options.disableStdin ?? false,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
       renderer: options.renderer ?? 'auto',
+      clipboardWrite: options.clipboardWrite ?? 'browser',
+      clipboardRead: options.clipboardRead ?? null,
+      colorScheme: options.colorScheme ?? 'auto',
     };
 
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
@@ -258,6 +299,10 @@ export class Terminal implements ITerminalCore {
         if (this.renderer) {
           console.warn('ntwebterm: theme changes after open() are not yet fully supported');
         }
+        break;
+
+      case 'clipboardRead':
+        this.wasmTerm?.setClipboardReadHandler(this.options.clipboardRead ?? undefined);
         break;
 
       case 'fontSize':
@@ -425,6 +470,37 @@ export class Terminal implements ITerminalCore {
       this.onRenderHoldChanged(held);
     });
     this.syncProgramStatusHandler();
+
+    // Effect callbacks: libghostty-vt parses the sequences; only the
+    // browser-facing action lives here.
+    this.wasmTerm.setClipboardWritePolicy(() =>
+      this.options.clipboardWrite === 'deny' ? 'denied' : 'success'
+    );
+    this.wasmTerm.setClipboardWriteHandler((event) => {
+      if (this.options.clipboardWrite === 'browser' && event.text !== null) {
+        writeTextToClipboard(event.text);
+      }
+      this.clipboardWriteEmitter.fire(event);
+    });
+    this.wasmTerm.setClipboardReadHandler(this.options.clipboardRead ?? undefined);
+    this.wasmTerm.setPwdChangeHandler((pwd) => this.pwdChangeEmitter.fire(pwd));
+    this.wasmTerm.setNotificationHandler((n) => this.notificationEmitter.fire(n));
+    this.wasmTerm.setProgressHandler((r) => this.progressEmitter.fire(r));
+    this.wasmTerm.setSemanticPromptHandler((e) => this.semanticPromptEmitter.fire(e));
+    this.wasmTerm.setResizeRequestHandler((r) => this.resizeRequestEmitter.fire(r));
+    this.wasmTerm.setColorSchemeProvider(() => this.resolveColorScheme());
+  }
+
+  /** The scheme reported for CSI ? 996 n: the option, or the theme background's luminance. */
+  private resolveColorScheme(): ColorScheme {
+    if (this.options.colorScheme !== 'auto') return this.options.colorScheme;
+    const rgb = this.parseColorToHex(this.options.theme?.background ?? DEFAULT_THEME.background);
+    if (rgb === undefined) return 'dark';
+    const r = (rgb >> 16) & 0xff;
+    const g = (rgb >> 8) & 0xff;
+    const b = rgb & 0xff;
+    // Relative luminance (sRGB coefficients) on 0-255 channels.
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b > 127.5 ? 'light' : 'dark';
   }
 
   private onRenderHoldChanged(held: boolean): void {
@@ -1523,6 +1599,12 @@ export class Terminal implements ITerminalCore {
     this.keyEmitter.dispose();
     this.titleChangeEmitter.dispose();
     this.programStatusEmitter.dispose();
+    this.clipboardWriteEmitter.dispose();
+    this.pwdChangeEmitter.dispose();
+    this.notificationEmitter.dispose();
+    this.progressEmitter.dispose();
+    this.semanticPromptEmitter.dispose();
+    this.resizeRequestEmitter.dispose();
     this.scrollEmitter.dispose();
     this.renderEmitter.dispose();
     this.cursorMoveEmitter.dispose();

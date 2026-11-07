@@ -675,19 +675,27 @@ export enum TerminalOption {
   XTVERSION = 5,
   TITLE_CHANGED = 6,
   SIZE = 7,
+  COLOR_SCHEME = 8,
   COLOR_FOREGROUND = 12,
   COLOR_BACKGROUND = 13,
   COLOR_CURSOR = 14,
   COLOR_PALETTE = 15,
   KITTY_IMAGE_STORAGE_LIMIT = 16,
   KITTY_IMAGE_MEDIUM_SHARED_MEM = 19,
+  PWD_CHANGED = 26,
+  CLIPBOARD_WRITE = 27,
   SCROLLBACK_MAX_BYTES = 28,
   SCROLLBACK_MAX_LINES = 29,
+  DESKTOP_NOTIFICATION = 30,
+  PROGRESS_REPORT = 31,
   MODE_DEFAULT = 34,
   MODE = 35,
+  CLIPBOARD_READ = 39,
   RENDER_HOLD = 42,
+  SEMANTIC_PROMPT = 43,
   RESET = 44,
   PROGRAM_STATUS = 47,
+  RESIZE_WINDOW = 48,
 }
 
 /**
@@ -1290,6 +1298,82 @@ export enum TerminalMode {
  * `clear` removes that id and descendants; an empty id clears all records.
  * Embedders own record lifetimes, including cleanup when the process exits.
  */
+/** Clipboard a program addressed. Mirrors GhosttyClipboardLocation. */
+export type ClipboardLocation = 'standard' | 'selection' | 'primary';
+
+/** One MIME representation of a clipboard value. `data` is a copy. */
+export interface ClipboardContent {
+  mime: string;
+  data: Uint8Array;
+}
+
+/** An OSC 52 / OSC 5522 clipboard write a program requested. */
+export interface ClipboardWriteEvent {
+  location: ClipboardLocation;
+  /** The first text/* representation decoded as UTF-8, or null if there is none. */
+  text: string | null;
+  /** Every representation the program supplied; empty means "clear the clipboard". */
+  contents: ClipboardContent[];
+  /** Name of the writing program when the protocol carries one. */
+  program: string;
+  /** True when the terminal already holds a session grant for this program. */
+  granted: boolean;
+}
+
+/** Outcome reported back to the program for a clipboard write. Mirrors GhosttyClipboardWriteResult. */
+export type ClipboardWriteResult = 'success' | 'denied' | 'unsupported';
+
+/** An OSC 52 "?" / OSC 5522 clipboard read a program requested. */
+export interface ClipboardReadRequest {
+  location: ClipboardLocation;
+  /** MIME types wanted, in preference order. OSC 52 asks for "text/plain". */
+  mimes: string[];
+  /** True if the program also wants the list of available MIME types. */
+  list: boolean;
+  program: string;
+  granted: boolean;
+}
+
+/**
+ * Answers a clipboard read synchronously. Return the text to hand to the
+ * program, or null to deny. The VT stream is paused until this returns.
+ */
+export type ClipboardReadHandler = (request: ClipboardReadRequest) => string | null;
+
+/** OSC 9 / OSC 777 desktop notification. OSC 9 has no title. */
+export interface DesktopNotification {
+  title: string;
+  body: string;
+}
+
+/** OSC 9;4 (ConEmu) progress report. Mirrors GhosttyTerminalProgressState. */
+export interface ProgressReport {
+  state: 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
+  /** Percentage 0-100 when the report carries one, otherwise null. */
+  progress: number | null;
+}
+
+/** OSC 133 shell-integration event. Mirrors GhosttyTerminalSemanticPrompt. */
+export interface SemanticPromptEvent {
+  kind: 'prompt-start' | 'input-start' | 'output-start' | 'command-end';
+  promptKind: 'primary' | 'right' | 'continuation' | 'secondary';
+  /** Exit code for command-end when the shell reported one. */
+  exitCode: number | null;
+  /** Decoded command line for output-start when the shell sent one. */
+  command: string;
+  /** Error description for command-end when the shell sent one. */
+  error: string;
+}
+
+/** CSI 8 ; rows ; cols t. A zero dimension means "keep the current value". */
+export interface ResizeRequest {
+  rows: number;
+  cols: number;
+}
+
+/** Answer to a CSI ? 996 n color scheme query. Mirrors GhosttyColorScheme. */
+export type ColorScheme = 'light' | 'dark';
+
 export interface ProgramStatusReport {
   state: 'idle' | 'working' | 'done' | 'blocked' | 'error' | 'clear';
   kind: 'permission' | 'question' | 'auth' | null;

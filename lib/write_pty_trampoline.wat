@@ -24,8 +24,8 @@
 ;;   READ_SHM: same signature as DECODE_PNG, but input is an object name;
 ;;     only data_ptr and data_len are used in the output struct.
 ;;
-;; Rebuild after edits:
-;;   wat2wasm lib/write_pty_trampoline.wat -o /tmp/trampoline.wasm
+;; Rebuild after edits (wasm-tools strips the names section so the bytes stay small):
+;;   wasm-tools parse lib/write_pty_trampoline.wat | wasm-tools strip -o /tmp/trampoline.wasm
 ;; Then update the byte literal in lib/write_pty_trampoline.ts.
 (module
   (type $program_status_sig (func (param i32 i32 i32)))
@@ -44,6 +44,18 @@
   (import "env" "bell_cb" (func $bell_cb (type $notify_sig)))
   (import "env" "title_changed_cb" (func $title_changed_cb (type $notify_sig)))
   (import "env" "render_hold_cb" (func $render_hold_cb (type $program_status_sig)))
+
+  ;; libghostty-vt 1.0 effect callbacks (see ghostty/include/ghostty/vt/terminal.h).
+  ;; Payload callbacks share the (terminal, userdata, ptr) -> nil shape;
+  ;; PWD_CHANGED has no payload; COLOR_SCHEME fills *out_scheme and returns bool.
+  (import "env" "clipboard_write_cb" (func $clipboard_write_cb (type $program_status_sig)))
+  (import "env" "clipboard_read_cb" (func $clipboard_read_cb (type $program_status_sig)))
+  (import "env" "pwd_changed_cb" (func $pwd_changed_cb (type $notify_sig)))
+  (import "env" "desktop_notification_cb" (func $desktop_notification_cb (type $program_status_sig)))
+  (import "env" "progress_report_cb" (func $progress_report_cb (type $program_status_sig)))
+  (import "env" "semantic_prompt_cb" (func $semantic_prompt_cb (type $program_status_sig)))
+  (import "env" "resize_window_cb" (func $resize_window_cb (type $program_status_sig)))
+  (import "env" "color_scheme_cb" (func $color_scheme_cb (type $size_sig)))
 
   (func $program_status_fwd (export "program_status_fwd") (type $program_status_sig)
     local.get 0 local.get 1 local.get 2
@@ -75,4 +87,36 @@
 
   (func $render_hold_fwd (export "render_hold_fwd") (type $program_status_sig)
     local.get 0  local.get 1  local.get 2
-    call $render_hold_cb))
+    call $render_hold_cb)
+
+  (func $clipboard_write_fwd (export "clipboard_write_fwd") (type $program_status_sig)
+    local.get 0  local.get 1  local.get 2
+    call $clipboard_write_cb)
+
+  (func $clipboard_read_fwd (export "clipboard_read_fwd") (type $program_status_sig)
+    local.get 0  local.get 1  local.get 2
+    call $clipboard_read_cb)
+
+  (func $pwd_changed_fwd (export "pwd_changed_fwd") (type $notify_sig)
+    local.get 0  local.get 1
+    call $pwd_changed_cb)
+
+  (func $desktop_notification_fwd (export "desktop_notification_fwd") (type $program_status_sig)
+    local.get 0  local.get 1  local.get 2
+    call $desktop_notification_cb)
+
+  (func $progress_report_fwd (export "progress_report_fwd") (type $program_status_sig)
+    local.get 0  local.get 1  local.get 2
+    call $progress_report_cb)
+
+  (func $semantic_prompt_fwd (export "semantic_prompt_fwd") (type $program_status_sig)
+    local.get 0  local.get 1  local.get 2
+    call $semantic_prompt_cb)
+
+  (func $resize_window_fwd (export "resize_window_fwd") (type $program_status_sig)
+    local.get 0  local.get 1  local.get 2
+    call $resize_window_cb)
+
+  (func $color_scheme_fwd (export "color_scheme_fwd") (type $size_sig)
+    local.get 0  local.get 1  local.get 2
+    call $color_scheme_cb))

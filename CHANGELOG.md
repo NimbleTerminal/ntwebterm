@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Wire the libghostty-vt effect callbacks: OSC 52/5522 clipboard writes go to the browser clipboard by default (`clipboardWrite` option, `onClipboardWrite`), clipboard reads are refused unless a synchronous `clipboardRead` handler is supplied, and `onPwdChange`/`term.pwd`, `onNotification`, `onProgress`, `onSemanticPrompt` and `onResizeRequest` expose OSC 7, OSC 9/777, OSC 9;4, OSC 133 and CSI 8 t. CSI ? 996 n is answered from the theme (`colorScheme` option).
+- Add `forwardNotificationsToBrowser()`, a reference implementation that shows OSC 9/777 notifications through the browser Notification API without prompting unless asked.
+- Export `writeTextToClipboard()`, the clipboard strategy shared by selection copy and OSC 52.
+
 ### Changed
 
 - Update the Ghostty submodule to libghostty-vt 1.0.0 (`vt-1.0.0`), the first release with a frozen C ABI, and rebase the WASM API patch onto it.

@@ -11,6 +11,7 @@
  */
 
 import type { RowBidiMapper } from './bidi';
+import { writeTextToClipboard } from './clipboard';
 import { EventEmitter } from './event-emitter';
 import type { GhosttyTerminal } from './ghostty';
 import type { IEvent } from './interfaces';
@@ -1041,102 +1042,9 @@ export class SelectionManager {
     return { startCol, endCol };
   }
 
-  /**
-   * Copy text to clipboard
-   *
-   * Strategy (modern APIs first):
-   * 1. Try ClipboardItem API (works in Safari and modern browsers)
-   *    - Safari requires the ClipboardItem to be created synchronously within user gesture
-   * 2. Try navigator.clipboard.writeText (modern async API, may fail in Safari)
-   * 3. Fall back to execCommand (legacy, for older browsers)
-   */
+  /** Copy text to the clipboard (shared browser strategy in clipboard.ts). */
   private copyToClipboard(text: string): void {
-    // First try: ClipboardItem API (modern, Safari-compatible)
-    // Safari allows this because we create the ClipboardItem synchronously
-    // within the user gesture, even though the write is async
-    if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
-      try {
-        const blob = new Blob([text], { type: 'text/plain' });
-        const clipboardItem = new ClipboardItem({
-          'text/plain': blob,
-        });
-        navigator.clipboard.write([clipboardItem]).catch((err) => {
-          console.warn('ClipboardItem write failed, trying writeText:', err);
-          // Try writeText as fallback
-          this.copyWithWriteText(text);
-        });
-        return;
-      } catch (err) {
-        // ClipboardItem not supported or failed, fall through
-      }
-    }
-
-    // Second try: basic async writeText (works in Chrome, may fail in Safari)
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch((err) => {
-        console.warn('Clipboard writeText failed, trying execCommand:', err);
-        // Fall back to execCommand
-        this.copyWithExecCommand(text);
-      });
-      return;
-    }
-
-    // Third try: legacy execCommand fallback
-    this.copyWithExecCommand(text);
-  }
-
-  /**
-   * Copy using navigator.clipboard.writeText
-   */
-  private copyWithWriteText(text: string): void {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch((err) => {
-        console.warn('Clipboard writeText failed, trying execCommand:', err);
-        this.copyWithExecCommand(text);
-      });
-    } else {
-      this.copyWithExecCommand(text);
-    }
-  }
-
-  /**
-   * Copy using legacy execCommand (fallback for older browsers)
-   */
-  private copyWithExecCommand(text: string): void {
-    const previouslyFocused = document.activeElement as HTMLElement;
-    try {
-      // Position textarea offscreen but in a way that allows selection
-      const textarea = this.textarea;
-      textarea.value = text;
-      textarea.style.position = 'fixed';
-      textarea.style.left = '-9999px';
-      textarea.style.top = '0';
-      textarea.style.width = '1px';
-      textarea.style.height = '1px';
-      textarea.style.opacity = '0';
-
-      // Select all text and copy
-      textarea.focus();
-      textarea.select();
-      textarea.setSelectionRange(0, text.length);
-
-      const success = document.execCommand('copy');
-
-      // Restore focus
-      if (previouslyFocused) {
-        previouslyFocused.focus();
-      }
-
-      if (!success) {
-        console.warn('execCommand copy failed');
-      }
-    } catch (err) {
-      console.warn('execCommand copy threw:', err);
-      // Restore focus on error
-      if (previouslyFocused) {
-        previouslyFocused.focus();
-      }
-    }
+    writeTextToClipboard(text, this.textarea);
   }
 
   /**

@@ -81,6 +81,16 @@ export {
 } from './ghostty';
 export { Key, KeyAction, Mods } from './types';
 export type {
+  ClipboardContent,
+  ClipboardLocation,
+  ClipboardReadHandler,
+  ClipboardReadRequest,
+  ClipboardWriteEvent,
+  ColorScheme,
+  DesktopNotification,
+  ProgressReport,
+  ResizeRequest,
+  SemanticPromptEvent,
   ProgramStatusReport,
   KeyEvent,
   GhosttyCell,
@@ -91,6 +101,9 @@ export type {
 
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer-canvas2d';
+export { writeTextToClipboard } from './clipboard';
+export { forwardNotificationsToBrowser } from './browser-notifications';
+export type { ForwardNotificationsOptions } from './browser-notifications';
 export type { ImageFrame, RenderImage } from './render-images';
 export type {
   Renderer,
