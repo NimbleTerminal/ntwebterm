@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
+import { type GhosttyWasmExports, TerminalData } from './types';
 
 /**
  * Helper to convert viewport row to absolute buffer row for selection tests.
@@ -1762,12 +1763,36 @@ describe('Terminal Config', () => {
         term.write(`Line ${i}\r\n`);
       }
 
-      // Scrollback should be limited based on the config
-      const scrollbackLength = term.wasmTerm!.getScrollbackLength();
-      // With 500 scrollback limit, we wrote 600 lines so scrollback should be capped
-      // The actual value depends on ghostty's implementation but should be around 500
-      expect(scrollbackLength).toBeLessThan(600);
-      expect(scrollbackLength).toBeGreaterThan(450);
+      // The configured line limit must reach the WASM terminal, and the byte
+      // budget must be lifted so the limit is expressed purely in lines.
+      const wasm = term.wasmTerm!;
+      const internals = wasm as unknown as {
+        exports: GhosttyWasmExports;
+        memory: WebAssembly.Memory;
+        handle: number;
+      };
+      // Returns null when the limit reports GHOSTTY_NO_VALUE (unlimited).
+      const readSizeT = (key: TerminalData): number | null => {
+        const { exports } = internals;
+        const ptr = exports.ghostty_wasm_alloc(4);
+        try {
+          const result = exports.ghostty_terminal_get(internals.handle, key, ptr);
+          if (result === -4 /* GHOSTTY_NO_VALUE */) return null;
+          expect(result).toBe(0);
+          return new DataView(internals.memory.buffer).getUint32(ptr, true);
+        } finally {
+          exports.ghostty_wasm_free(ptr, 4);
+        }
+      };
+      expect(readSizeT(TerminalData.SCROLLBACK_MAX_LINES)).toBe(500);
+      expect(readSizeT(TerminalData.SCROLLBACK_MAX_BYTES)).toBeNull();
+
+      // Ghostty prunes whole history pages once the line limit is exceeded,
+      // so after 600 lines the retained scrollback is capped at the limit but
+      // the exact count depends on where the page boundary fell.
+      const scrollbackLength = wasm.getScrollbackLength();
+      expect(scrollbackLength).toBeGreaterThan(0);
+      expect(scrollbackLength).toBeLessThanOrEqual(500);
     } finally {
       term.dispose();
     }

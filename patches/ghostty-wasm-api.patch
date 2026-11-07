@@ -1,50 +1,41 @@
 diff --git a/include/ghostty/vt/sys.h b/include/ghostty/vt/sys.h
-index c3abea7ef..4d17930aa 100644
+index 24f43c3ac..c075ab8f3 100644
 --- a/include/ghostty/vt/sys.h
 +++ b/include/ghostty/vt/sys.h
-@@ -246,6 +246,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
+@@ -199,6 +199,13 @@ typedef bool (*GhosttySysRandomSecureFn)(
+     uint8_t* buf,
+     size_t len);
+ 
++/**
++ * Browser shared-memory hook. Same signature and ownership as
++ * GhosttySysDecodePngFn: the callback fills the image's data buffer
++ * from the named shared-memory object.
++ */
++typedef GhosttySysDecodePngFn GhosttySysReadSharedMemoryFn;
++
+ /**
+  * System option identifiers for ghostty_sys_set().
+  */
+@@ -262,6 +269,12 @@ typedef enum GHOSTTY_ENUM_TYPED {
       * Input type: GhosttySysRandomSecureFn (function pointer, or NULL)
       */
-     GHOSTTY_SYS_OPT_RANDOM_SECURE = 3,
-+    /** Browser shared-memory hook; same signature and ownership as DECODE_PNG. */
-+    GHOSTTY_SYS_OPT_READ_SHARED_MEMORY = 4,
+     GHOSTTY_SYS_OPT_RANDOM_SECURE = 4,
++    /**
++     * Browser shared-memory hook; same signature and ownership as DECODE_PNG.
++     *
++     * Input type: GhosttySysReadSharedMemoryFn (function pointer, or NULL)
++     */
++    GHOSTTY_SYS_OPT_READ_SHARED_MEMORY = 5,
      GHOSTTY_SYS_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
  } GhosttySysOption;
-
-diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index 898d6e698..2f4201692 100644
---- a/src/terminal/Screen.zig
-+++ b/src/terminal/Screen.zig
-@@ -1055,15 +1055,14 @@ pub fn cursorDownScroll(self: *Screen) !void {
-         // Our new row is always dirty
-         self.cursorMarkDirty();
-
--        // Clear the new row so it gets our bg color. We only do this
--        // if we have a bg color at all.
--        if (self.cursor.style.bg_color != .none) {
-+        // ghostty-web: clear recycled cells and row metadata even with default colors.
-+        {
-             const page: *Page = self.cursor.page_pin.node.page();
--            self.clearCells(
--                page,
--                self.cursor.page_row,
--                page.getCells(self.cursor.page_row),
--            );
-+            const row = self.cursor.page_row;
-+            const cells_offset = row.cells;
-+            const dirty = row.dirty;
-+            self.clearCells(page, row, page.getCells(row));
-+            row.* = .{ .cells = cells_offset, .dirty = dirty };
-         }
-     }
-
+ 
 diff --git a/src/terminal/build_options.zig b/src/terminal/build_options.zig
-index f16cbf42f..0626c51cd 100644
+index ea32129d4..e1231a4da 100644
 --- a/src/terminal/build_options.zig
 +++ b/src/terminal/build_options.zig
 @@ -267,12 +267,10 @@ pub const Options = struct {
      };
-
+ 
      /// Whether the Kitty graphics feature is effectively enabled for
 -    /// the given target. Kitty graphics requires the ability to get
 -    /// timestamps and there is no way to do that on freestanding
@@ -57,49 +48,49 @@ index f16cbf42f..0626c51cd 100644
 +        _ = target; // ghostty-web: direct images and embedder shared-memory hook work on WASM.
          return self.features.kitty_graphics;
      }
-
+ 
 diff --git a/src/terminal/c/sys.zig b/src/terminal/c/sys.zig
-index 9d084270a..ae3cf3cc6 100644
+index 03f3ff4b1..12fe08dc1 100644
 --- a/src/terminal/c/sys.zig
 +++ b/src/terminal/c/sys.zig
 @@ -23,6 +23,9 @@ pub const DecodePngFn = *const fn (
      *Image,
  ) callconv(lib.calling_conv) bool;
-
+ 
 +/// Browser shared-memory hook uses the image decoder ABI.
 +pub const ReadSharedMemoryFn = DecodePngFn;
 +
  /// C: GhosttySysRandomSecureFn
  pub const RandomSecureFn = *const fn (
      ?*anyopaque,
-@@ -63,6 +66,7 @@ pub const Option = enum(c_int) {
-     decode_png = 1,
-     log = 2,
-     random_secure = 3,
-+    read_shared_memory = 4,
-
-     pub fn InType(comptime self: Option) type {
-         return switch (self) {
-@@ -70,6 +74,7 @@ pub const Option = enum(c_int) {
+@@ -64,6 +67,7 @@ pub const Option = enum(c_int) {
+     decode_png = 2,
+     log = 3,
+     random_secure = 4,
++    read_shared_memory = 5,
+ 
+     _,
+ 
+@@ -73,6 +77,7 @@ pub const Option = enum(c_int) {
              .decode_png => ?DecodePngFn,
              .log => ?LogFn,
              .random_secure => ?RandomSecureFn,
 +            .read_shared_memory => ?ReadSharedMemoryFn,
+             .invalid, _ => void,
          };
      }
- };
-@@ -81,6 +86,7 @@ const Global = struct {
+@@ -85,6 +90,7 @@ const Global = struct {
      decode_png: ?DecodePngFn = null,
      log: ?LogFn = null,
      random_secure: ?RandomSecureFn = null,
 +    read_shared_memory: ?ReadSharedMemoryFn = null,
  };
-
+ 
  /// Global state for the C sys interface.
-@@ -123,6 +129,18 @@ fn randomSecureWrapper(buffer: []u8) terminal_sys.RandomSecureError!void {
+@@ -127,6 +133,18 @@ fn randomSecureWrapper(buffer: []u8) terminal_sys.RandomSecureError!void {
      if (!func(global.userdata, buffer.ptr, buffer.len)) return error.EntropyUnavailable;
  }
-
+ 
 +fn readSharedMemoryWrapper(
 +    alloc: std.mem.Allocator,
 +    name: []const u8,
@@ -126,14 +117,26 @@ index 9d084270a..ae3cf3cc6 100644
          .random_secure => {
              global.random_secure = value;
              terminal_sys.random_secure = if (value != null) &randomSecureWrapper else null;
+diff --git a/src/terminal/c/types.zig b/src/terminal/c/types.zig
+index cb662f3f8..cc61ddb4b 100644
+--- a/src/terminal/c/types.zig
++++ b/src/terminal/c/types.zig
+@@ -598,6 +598,7 @@ pub const type_decls = [_]TypeDecl{
+     .initCallback("GhosttySysDecodePngFn", sys.DecodePngFn),
+     .initCallback("GhosttySysLogFn", sys.LogFn),
+     .initCallback("GhosttySysRandomSecureFn", sys.RandomSecureFn),
++    .initCallback("GhosttySysReadSharedMemoryFn", sys.ReadSharedMemoryFn),
+     .initCallback("GhosttyTerminalBellFn", terminal.Effects.BellFn),
+     .initCallback("GhosttyTerminalClipboardReadFn", terminal.Effects.ClipboardReadFn),
+     .initCallback("GhosttyTerminalClipboardWriteFn", terminal.Effects.ClipboardWriteFn),
 diff --git a/src/terminal/kitty/graphics_image.zig b/src/terminal/kitty/graphics_image.zig
-index 76abb9ad8..2489beb7e 100644
+index 281bb02e0..e96a54be2 100644
 --- a/src/terminal/kitty/graphics_image.zig
 +++ b/src/terminal/kitty/graphics_image.zig
 @@ -152,6 +152,15 @@ pub const LoadingImage = struct {
              return result;
          }
-
+ 
 +        // ghostty-web: WASM shared memory is supplied by the embedder.
 +        // Keep filesystem paths out of the freestanding compilation.
 +        if (comptime builtin.target.cpu.arch.isWasm()) {
@@ -149,7 +152,7 @@ index 76abb9ad8..2489beb7e 100644
 @@ -193,6 +202,32 @@ pub const LoadingImage = struct {
          return result;
      }
-
+ 
 +    /// Browser registry objects are tightly packed, with no POSIX page padding.
 +    /// This hook consumes whole objects; non-zero offsets are unsupported.
 +    fn readSharedMemoryHook(
@@ -186,11 +189,11 @@ index 3f6b5017d..7cf1af652 100644
 @@ -20,6 +20,10 @@ pub var decode_png: ?DecodePngFn = png: {
      break :png &decodePngWuffs;
  };
-
+ 
 +/// Browser shared-memory hook; returned bytes belong to the caller.
 +pub var read_shared_memory: ?ReadSharedMemoryFn = null;
 +pub const ReadSharedMemoryFn = *const fn (Allocator, []const u8) DecodeError![]u8;
 +
  pub const DecodeError = Allocator.Error || error{InvalidData};
  pub const DecodePngFn = *const fn (Allocator, []const u8) DecodeError!Image;
-
+ 

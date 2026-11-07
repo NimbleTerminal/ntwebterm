@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Update the Ghostty submodule to libghostty-vt 1.0.0 (`vt-1.0.0`), the first release with a frozen C ABI, and rebase the WASM API patch onto it.
+- Follow the 1.0 ABI in the TypeScript bindings: renumbered option enums (`_INVALID = 0` sentinels), `ghostty_key_encoder_set*` renames, `GhosttyString`-by-value key text, the 16-byte `GhosttyStyle`, size-less callback payloads and grid references, `GhosttyCodepointBuffer` grapheme reads, and the `PIXELS`/`EXPECTED_LEN` Kitty image keys.
+- Lift the upstream scrollback byte budget with `SIZE_MAX`; a NULL value now restores the 10,000-byte default instead of removing it.
+- Drop the recycled-row clearing hunk from the patch, since upstream now zeroes recycled rows itself.
+
 ## 0.4.2
 
 ### Added

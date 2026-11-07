@@ -187,10 +187,38 @@ descendants, and clear everything for a `clear` report with an empty id. Both RI
 and `term.reset()` emit that full clear. The host must also apply the protocol's
 process-exit lifetime rules; the browser terminal cannot detect PTY process exits.
 
-The Ghostty submodule is pinned to **v1.4.0**,
-`83fb95624b0439ee660c2679b43b38c8b63769cd` (October 27, 2026).
+The Ghostty submodule is pinned to **libghostty-vt 1.0.0** (tag `vt-1.0.0`,
+`0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec`, November 6, 2026).
 Rebuilding requires Zig **0.17.0**; use
 `ZIG=/absolute/path/to/zig bun run build` if your system compiler differs.
+
+### Upstream libghostty-vt 1.0.0 sync
+
+`vt-1.0.0` is the first stable libghostty-vt release: upstream now freezes the
+C ABI (option enums, callback payload structs and the type manifest) and gates
+non-additive changes in CI, so future syncs should need far fewer binding
+updates. Compared with the v1.4.0 pin, this release changed the ABI as follows:
+
+| Upstream change                                                                                                                    | Effect on ntwebterm                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every option/data enum gains an `_INVALID = 0` sentinel, shifting most values by one                                               | `TerminalOption`, `SysOption`, `KeyEncoderOption`, `RenderStateOption`, `RenderStateRowOption` and the Kitty iterator option were renumbered in `types.ts`. |
+| `ghostty_key_encoder_setopt*` renamed to `ghostty_key_encoder_set*`; `ghostty_key_event_set_utf8` takes a `GhosttyString` by value | Bindings renamed; the UTF-8 text is passed as an 8-byte `{ ptr, len }` struct.                                                                              |
+| `GhosttyKey` adds `FN` (146) and renames keys (`DIGIT_*`, `ARROW_*`, `NUMPAD_*`, `BACKQUOTE`)                                      | `Key` values from `FN_LOCK` onward shifted by one; the TypeScript names are unchanged.                                                                      |
+| Callback payload structs drop their `size` prefix (`GhosttyTerminalProgramStatus`, `GhosttyGridRef`, `GhosttySelection`, ...)      | OSC 7501 program status and grid-reference decoding use the new offsets.                                                                                    |
+| `GhosttyStyle` is a frozen 16-byte struct: 4-byte `GhosttyStyleColor` values and a `GhosttyStyleFlags` bitfield                    | Cell style decoding reads the flags word and 1-byte color tags instead of the old 72-byte struct.                                                           |
+| `GRAPHEMES_BUF` takes a `GhosttyCodepointBuffer { ptr, cap, len }`                                                                 | Viewport grapheme reads pass a descriptor; the old bare-pointer call silently returned nothing.                                                             |
+| Kitty image data keys `DATA_PTR`/`DATA_LEN` become `PIXELS` (a `GhosttyString`) and `EXPECTED_LEN`                                 | `getKittyImagePixels()` reads the string pair and treats `GHOSTTY_NO_VALUE` as "not yet loaded".                                                            |
+| The placement iterator's layer filter is a `GHOSTTY_IMAGE_LAYER_MASK_*` bitmask                                                    | `KittyGraphicsPlacementLayer` is now a mask; `KittyGraphicsImageLayer` mirrors `GhosttyImageLayer`.                                                         |
+| `SCROLLBACK_MAX_BYTES` with a NULL value restores the 10,000-byte default instead of removing it                                   | The byte budget is lifted with `SIZE_MAX`, so `scrollbackLimit` keeps meaning lines.                                                                        |
+| `cursorDownScroll` zeroes recycled rows upstream                                                                                   | Our recycled-row clearing hunk was dropped from the patch; `viewport-corruption.test.ts` still guards the behavior.                                         |
+
+The browser shared-memory hook in `patches/ghostty-wasm-api.patch` now also
+registers `GhosttySysReadSharedMemoryFn` in upstream's type manifest, which the
+1.0 build requires for every option that takes a callback.
+
+See the [upstream comparison](https://github.com/ghostty-org/ghostty/compare/v1.4.0...vt-1.0.0)
+and the [vt-1.0.0 C API headers](https://github.com/ghostty-org/ghostty/tree/vt-1.0.0/include/ghostty/vt)
+for the complete API changes.
 
 ### Upstream v1.4.0 sync
 
