@@ -183,6 +183,8 @@ bun run typecheck                     # Check types without compiling
 term.write('Hello!\r\n');
 (term.cols, term.rows);
 term.wasmTerm.getCursor(); // WASM cursor state
+term.ghosttyVersion; // libghostty-vt version, e.g. "1.0.0" (put it in bug reports)
+term.ghosttyBuildInfo; // optimize mode, SIMD, feature flags of the loaded WASM
 
 // Check WASM memory
 const cells = term.wasmTerm.getLine(0);

@@ -51,6 +51,7 @@ import type {
   DesktopNotification,
   ILink,
   ILinkProvider,
+  LibghosttyBuildInfo,
   ProgramStatusReport,
   ProgressReport,
   ResizeRequest,
@@ -169,6 +170,21 @@ export class Terminal implements ITerminalCore {
   /** Working directory the shell last reported, raw (a file:// URI for OSC 7). Empty if none. */
   get pwd(): string {
     return this.wasmTerm?.getPwd() ?? '';
+  }
+
+  /** Version of the libghostty-vt this terminal runs on, e.g. "1.0.0". Include it in bug reports. */
+  get ghosttyVersion(): string {
+    return this.requireGhostty().version;
+  }
+
+  /** Compile-time configuration (version parts, optimize mode, features) of the loaded libghostty-vt. */
+  get ghosttyBuildInfo(): LibghosttyBuildInfo {
+    return this.requireGhostty().buildInfo;
+  }
+
+  private requireGhostty(): Ghostty {
+    if (!this.ghostty) throw new Error('Terminal is disposed');
+    return this.ghostty;
   }
   public readonly onScroll: IEvent<number> = this.scrollEmitter.event;
   public readonly onRender: IEvent<{ start: number; end: number }> = this.renderEmitter.event;

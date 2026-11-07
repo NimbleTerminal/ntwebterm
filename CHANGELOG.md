@@ -8,6 +8,7 @@
 - Add `forwardNotificationsToBrowser()`, a reference implementation that shows OSC 9/777 notifications through the browser Notification API without prompting unless asked.
 - Export `writeTextToClipboard()`, the clipboard strategy shared by selection copy and OSC 52.
 - Generate the libghostty-vt ABI bindings (`lib/ghostty-abi.ts`) from upstream's frozen manifest with `bun run gen:abi`, and add drift tests that compare the generated file, the built WASM's `ghostty_type_json()` and upstream's `symbols.txt`.
+- Expose the loaded library's version and compile-time configuration: `term.ghosttyVersion` / `ghostty.version` bind `ghostty_version()`, and `term.ghosttyBuildInfo` / `ghostty.buildInfo` decode every `ghostty_build_info()` field into a `LibghosttyBuildInfo` (version parts, optimize mode, SIMD, feature flags).
 
 ### Changed
 

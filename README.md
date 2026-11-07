@@ -235,6 +235,20 @@ The Ghostty submodule is pinned to **libghostty-vt 1.0.0** (tag `vt-1.0.0`,
 Rebuilding requires Zig **0.17.0**; use
 `ZIG=/absolute/path/to/zig bun run build` if your system compiler differs.
 
+### Library version and build info
+
+The terminal reports which libghostty-vt it runs on, so bug reports can say so:
+
+```typescript
+term.ghosttyVersion; // "1.0.0" (ghostty_version())
+term.ghosttyBuildInfo; // ghostty_build_info(): { version, major, minor, patch, pre, build,
+//   optimize: 'release_small', simd: false, features: { kittyGraphics: true, renderState: true, ... } }
+```
+
+Both are also available on `Ghostty` (`ghostty.version`, `ghostty.buildInfo`) before any
+terminal is created. The submodule is pinned to the `vt-1.0.0` release tag, so the value
+should match the version in the README unless you built the WASM yourself.
+
 ### Upstream libghostty-vt 1.0.0 sync
 
 `vt-1.0.0` is the first stable libghostty-vt release: upstream now freezes the

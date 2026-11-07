@@ -122,6 +122,10 @@ export interface KeyEvent {
 export interface GhosttyWasmExports extends WebAssembly.Exports {
   memory: WebAssembly.Memory;
 
+  // Build info (constant for the lifetime of the module)
+  ghostty_version(): number;
+  ghostty_build_info(data: number, out: number): number;
+
   // Memory helpers
   ghostty_wasm_alloc_opaque(): number;
   ghostty_wasm_free_opaque(ptr: number): void;
@@ -833,6 +837,41 @@ export interface ResizeRequest {
 
 /** Answer to a CSI ? 996 n color scheme query. Mirrors GhosttyColorScheme. */
 export type ColorScheme = 'light' | 'dark';
+
+/**
+ * What the loaded libghostty-vt knows about how it was built, read from
+ * `ghostty_version()` and `ghostty_build_info()`. Constant for the lifetime
+ * of the module; include it in bug reports.
+ */
+export interface LibghosttyBuildInfo {
+  /** Full version string, e.g. "1.0.0" or "1.1.0-dev+abc1234". */
+  version: string;
+  major: number;
+  minor: number;
+  patch: number;
+  /** Pre-release label such as "dev"; empty for a release. */
+  pre: string;
+  /** Build metadata such as a commit hash; empty for a release. */
+  build: string;
+  /** Zig optimization mode the library was compiled with. */
+  optimize: 'debug' | 'release_safe' | 'release_small' | 'release_fast';
+  /** Whether SIMD-accelerated code paths are enabled. */
+  simd: boolean;
+  /** Compile-time features (see upstream's build options). */
+  features: {
+    kittyGraphics: boolean;
+    tmuxControlMode: boolean;
+    snapshot: boolean;
+    formatter: boolean;
+    selection: boolean;
+    search: boolean;
+    renderState: boolean;
+    inputEncode: boolean;
+    color: boolean;
+    gridIntrospection: boolean;
+    glyphProtocol: boolean;
+  };
+}
 
 export interface ProgramStatusReport {
   state: 'idle' | 'working' | 'done' | 'blocked' | 'error' | 'clear';

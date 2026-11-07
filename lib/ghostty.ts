@@ -10,6 +10,7 @@ import { RenderImages } from './render-images';
 
 import { decode as decodePng } from 'fast-png';
 import {
+  GhosttyBuildInfo,
   GhosttyClipboardContentLayout,
   GhosttyClipboardReadLayout,
   GhosttyClipboardReadReplyLayout,
@@ -22,9 +23,11 @@ import {
   GhosttyColorScheme,
   GhosttyGridRefLayout,
   GhosttyKittyGraphicsPlacementRenderInfoLayout,
+  GhosttyOptimizeMode,
   GhosttyPointCoordinateLayout,
   GhosttyPointLayout,
   GhosttyPointValueLayout,
+  GhosttyResult,
   GhosttySizeReportSizeLayout,
   GhosttyStringLayout,
   GhosttyStyleColorLayout,
@@ -66,6 +69,7 @@ import {
   type KittyImagePixels,
   type KittyKeyFlags,
   type KittyPlacementInfo,
+  type LibghosttyBuildInfo,
   PointTag,
   type ProgramStatusReport,
   type ProgressReport,
@@ -120,10 +124,85 @@ export {
 export class Ghostty {
   private exports: GhosttyWasmExports;
   private memory: WebAssembly.Memory;
+  private cachedBuildInfo?: LibghosttyBuildInfo;
 
   constructor(wasmInstance: WebAssembly.Instance) {
     this.exports = wasmInstance.exports as GhosttyWasmExports;
     this.memory = this.exports.memory;
+  }
+
+  /** Version of the loaded libghostty-vt (`ghostty_version()`), e.g. "1.0.0". */
+  get version(): string {
+    const ptr = this.exports.ghostty_version();
+    const bytes = new Uint8Array(this.memory.buffer);
+    let end = ptr;
+    while (bytes[end] !== 0) end++;
+    return new TextDecoder().decode(bytes.subarray(ptr, end));
+  }
+
+  /** Compile-time configuration of the loaded library (`ghostty_build_info()`). */
+  get buildInfo(): LibghosttyBuildInfo {
+    this.cachedBuildInfo ??= this.readBuildInfo();
+    return this.cachedBuildInfo;
+  }
+
+  private readBuildInfo(): LibghosttyBuildInfo {
+    // Every output type fits in a GhosttyString (the largest, 8 bytes).
+    const out = this.exports.ghostty_wasm_alloc(GhosttyStringLayout.size);
+    const query = (key: GhosttyBuildInfo): DataView => {
+      const view = new DataView(this.memory.buffer);
+      view.setUint32(out, 0, true);
+      view.setUint32(out + 4, 0, true);
+      const r = this.exports.ghostty_build_info(key, out);
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(`ghostty_build_info(${GhosttyBuildInfo[key]}) failed: ${GhosttyResult[r]}`);
+      }
+      return new DataView(this.memory.buffer);
+    };
+    const flag = (key: GhosttyBuildInfo) => query(key).getUint8(out) !== 0;
+    const size = (key: GhosttyBuildInfo) => query(key).getUint32(out, true);
+    const string = (key: GhosttyBuildInfo) => {
+      const view = query(key);
+      const ptr = view.getUint32(out + GhosttyStringLayout.offset.ptr, true);
+      const len = view.getUint32(out + GhosttyStringLayout.offset.len, true);
+      return len === 0
+        ? ''
+        : new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len));
+    };
+    const optimizeNames = {
+      [GhosttyOptimizeMode.DEBUG]: 'debug',
+      [GhosttyOptimizeMode.RELEASE_SAFE]: 'release_safe',
+      [GhosttyOptimizeMode.RELEASE_SMALL]: 'release_small',
+      [GhosttyOptimizeMode.RELEASE_FAST]: 'release_fast',
+    } as const;
+    try {
+      const optimize = query(GhosttyBuildInfo.OPTIMIZE).getInt32(out, true) as GhosttyOptimizeMode;
+      return {
+        version: string(GhosttyBuildInfo.VERSION_STRING),
+        major: size(GhosttyBuildInfo.VERSION_MAJOR),
+        minor: size(GhosttyBuildInfo.VERSION_MINOR),
+        patch: size(GhosttyBuildInfo.VERSION_PATCH),
+        pre: string(GhosttyBuildInfo.VERSION_PRE),
+        build: string(GhosttyBuildInfo.VERSION_BUILD),
+        optimize: optimizeNames[optimize],
+        simd: flag(GhosttyBuildInfo.SIMD),
+        features: {
+          kittyGraphics: flag(GhosttyBuildInfo.KITTY_GRAPHICS),
+          tmuxControlMode: flag(GhosttyBuildInfo.TMUX_CONTROL_MODE),
+          snapshot: flag(GhosttyBuildInfo.FEATURE_SNAPSHOT),
+          formatter: flag(GhosttyBuildInfo.FEATURE_FORMATTER),
+          selection: flag(GhosttyBuildInfo.FEATURE_SELECTION),
+          search: flag(GhosttyBuildInfo.FEATURE_SEARCH),
+          renderState: flag(GhosttyBuildInfo.FEATURE_RENDER_STATE),
+          inputEncode: flag(GhosttyBuildInfo.FEATURE_INPUT_ENCODE),
+          color: flag(GhosttyBuildInfo.FEATURE_COLOR),
+          gridIntrospection: flag(GhosttyBuildInfo.FEATURE_GRID_INTROSPECTION),
+          glyphProtocol: flag(GhosttyBuildInfo.FEATURE_GLYPH_PROTOCOL),
+        },
+      };
+    } finally {
+      this.exports.ghostty_wasm_free(out, GhosttyStringLayout.size);
+    }
   }
 
   createKeyEncoder(): KeyEncoder {

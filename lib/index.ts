@@ -92,6 +92,7 @@ export type {
   ResizeRequest,
   SemanticPromptEvent,
   ProgramStatusReport,
+  LibghosttyBuildInfo,
   KeyEvent,
   GhosttyCell,
   RGB,
