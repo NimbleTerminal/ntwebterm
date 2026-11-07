@@ -48,87 +48,6 @@ export enum StyleFlag {
  */
 
 // ============================================================================
-// SGR (Select Graphic Rendition) Types
-// ============================================================================
-
-/**
- * SGR attribute tags - identifies the type of attribute
- * From include/ghostty/vt/sgr.h
- */
-export enum SgrAttributeTag {
-  UNSET = 0,
-  UNKNOWN = 1,
-  BOLD = 2,
-  RESET_BOLD = 3,
-  ITALIC = 4,
-  RESET_ITALIC = 5,
-  FAINT = 6,
-  RESET_FAINT = 7,
-  UNDERLINE = 8,
-  RESET_UNDERLINE = 9,
-  BLINK = 10,
-  RESET_BLINK = 11,
-  INVERSE = 12,
-  RESET_INVERSE = 13,
-  INVISIBLE = 14,
-  RESET_INVISIBLE = 15,
-  STRIKETHROUGH = 16,
-  RESET_STRIKETHROUGH = 17,
-  FG_8 = 18, // 8-color (0-7)
-  FG_16 = 19, // 16-color (0-15)
-  FG_256 = 20, // 256-color palette
-  FG_RGB = 21, // RGB color
-  FG_DEFAULT = 22, // Reset to default
-  BG_8 = 23, // Background 8-color
-  BG_16 = 24, // Background 16-color
-  BG_256 = 25, // Background 256-color
-  BG_RGB = 26, // Background RGB
-  BG_DEFAULT = 27, // Reset background
-  UNDERLINE_COLOR_8 = 28,
-  UNDERLINE_COLOR_16 = 29,
-  UNDERLINE_COLOR_256 = 30,
-  UNDERLINE_COLOR_RGB = 31,
-  UNDERLINE_COLOR_DEFAULT = 32,
-}
-
-export interface RGBColor {
-  r: number;
-  g: number;
-  b: number;
-}
-
-export type SgrAttribute =
-  | { tag: SgrAttributeTag.BOLD }
-  | { tag: SgrAttributeTag.RESET_BOLD }
-  | { tag: SgrAttributeTag.ITALIC }
-  | { tag: SgrAttributeTag.RESET_ITALIC }
-  | { tag: SgrAttributeTag.FAINT }
-  | { tag: SgrAttributeTag.RESET_FAINT }
-  | { tag: SgrAttributeTag.UNDERLINE }
-  | { tag: SgrAttributeTag.RESET_UNDERLINE }
-  | { tag: SgrAttributeTag.BLINK }
-  | { tag: SgrAttributeTag.RESET_BLINK }
-  | { tag: SgrAttributeTag.INVERSE }
-  | { tag: SgrAttributeTag.RESET_INVERSE }
-  | { tag: SgrAttributeTag.INVISIBLE }
-  | { tag: SgrAttributeTag.RESET_INVISIBLE }
-  | { tag: SgrAttributeTag.STRIKETHROUGH }
-  | { tag: SgrAttributeTag.RESET_STRIKETHROUGH }
-  | { tag: SgrAttributeTag.FG_8; color: number }
-  | { tag: SgrAttributeTag.FG_16; color: number }
-  | { tag: SgrAttributeTag.FG_256; color: number }
-  | { tag: SgrAttributeTag.FG_RGB; color: RGBColor }
-  | { tag: SgrAttributeTag.FG_DEFAULT }
-  | { tag: SgrAttributeTag.BG_8; color: number }
-  | { tag: SgrAttributeTag.BG_16; color: number }
-  | { tag: SgrAttributeTag.BG_256; color: number }
-  | { tag: SgrAttributeTag.BG_RGB; color: RGBColor }
-  | { tag: SgrAttributeTag.BG_DEFAULT }
-  | { tag: SgrAttributeTag.UNDERLINE_COLOR_RGB; color: RGBColor }
-  | { tag: SgrAttributeTag.UNDERLINE_COLOR_DEFAULT }
-  | { tag: SgrAttributeTag.UNKNOWN; params: number[] };
-
-// ============================================================================
 // Key Encoder Types
 // ============================================================================
 
@@ -426,9 +345,8 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ): number;
   ghostty_sgr_next(parser: number, attrPtr: number): boolean;
   ghostty_sgr_attribute_tag(attrPtr: number): number;
-  ghostty_sgr_attribute_value(attrPtr: number, tagPtr: number): number;
-  ghostty_wasm_alloc_sgr_attribute(): number;
-  ghostty_wasm_free_sgr_attribute(ptr: number): void;
+  /** Returns a pointer to the GhosttySgrAttributeValue union inside `attrPtr`. */
+  ghostty_sgr_attribute_value(attrPtr: number): number;
 
   // Key encoder
   ghostty_key_encoder_new(allocator: number, encoderPtrPtr: number): number;
@@ -486,7 +404,6 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     outWrittenPtr: number
   ): number;
   ghostty_render_state_set(state: number, option: number, valuePtr: number): number;
-  ghostty_render_state_colors_get(state: number, outColorsPtr: number): number;
   // Row iterator: pre-allocated once, repopulated from the render state via
   // ghostty_render_state_get(state, ROW_ITERATOR, &iter).
   ghostty_render_state_row_iterator_new(allocatorPtr: number, outIterPtrPtr: number): number;
