@@ -179,6 +179,7 @@ carried the sequence returns, so listeners may write or dispose freely.
 | OSC 133 shell integration        | Nothing                                                    | `onSemanticPrompt`                                                   |
 | CSI 8 ; rows ; cols t            | The terminal is not resized                                | `onResizeRequest`                                                    |
 | CSI ? 996 n color scheme         | Answered from `theme.background` luminance                 | `colorScheme: 'auto' \| 'light' \| 'dark'`                           |
+| CSI ? 1004 h focus reporting     | CSI I / CSI O sent as the terminal gains or loses focus    | `term.hasFocusEvents()`; encoded by `ghostty_focus_encode()`         |
 
 ```typescript
 import { Terminal, forwardNotificationsToBrowser } from 'ntwebterm';

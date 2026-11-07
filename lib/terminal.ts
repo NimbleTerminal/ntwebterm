@@ -788,6 +788,9 @@ export class Terminal implements ITerminalCore {
       parent.addEventListener('mousemove', this.handleMouseMove);
       parent.addEventListener('mouseleave', this.handleMouseLeave);
       parent.addEventListener('click', this.handleClick);
+      // Focus reporting (mode 1004); focusin/focusout bubble from the textarea.
+      parent.addEventListener('focusin', this.handleFocusIn);
+      parent.addEventListener('focusout', this.handleFocusOut);
 
       // Setup document-level mouseup for scrollbar drag (so drag works even outside canvas)
       document.addEventListener('mouseup', this.handleMouseUp);
@@ -1913,6 +1916,8 @@ export class Terminal implements ITerminalCore {
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
       this.element.removeEventListener('click', this.handleClick);
+      this.element.removeEventListener('focusin', this.handleFocusIn);
+      this.element.removeEventListener('focusout', this.handleFocusOut);
 
       // Remove contenteditable and accessibility attributes added in open()
       this.element.removeAttribute('contenteditable');
@@ -2182,6 +2187,22 @@ export class Terminal implements ITerminalCore {
   /**
    * Handle mouse leave to clear link hover
    */
+  /**
+   * Report focus changes to the program (CSI I / CSI O) when it asked for
+   * them with mode 1004. Focus moving between the terminal element and its
+   * own textarea is not a change.
+   */
+  private reportFocus(gained: boolean, event: FocusEvent): void {
+    if (!this.wasmTerm || this.options.disableStdin) return;
+    const other = event.relatedTarget;
+    if (other instanceof Node && this.element?.contains(other)) return;
+    const bytes = this.wasmTerm.encodeFocus(gained);
+    if (bytes.length > 0) this.dataEmitter.fire(new TextDecoder().decode(bytes));
+  }
+
+  private handleFocusIn = (e: FocusEvent): void => this.reportFocus(true, e);
+  private handleFocusOut = (e: FocusEvent): void => this.reportFocus(false, e);
+
   private handleMouseLeave = (): void => {
     // Clear hyperlink underline
     if (this.renderer && this.wasmTerm) {

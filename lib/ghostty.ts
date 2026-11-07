@@ -22,6 +22,7 @@ import {
   GhosttyCodepointBufferLayout,
   GhosttyColorRgbLayout,
   GhosttyColorScheme,
+  GhosttyFocusEvent,
   GhosttyGridRefLayout,
   GhosttyKittyGraphicsPlacementRenderInfoLayout,
   GhosttyMimeReaderLayout,
@@ -135,6 +136,28 @@ export {
 /**
  * Main Ghostty WASM wrapper class
  */
+/** CSI I / CSI O from ghostty_focus_encode(); a 16-byte buffer always fits. */
+function encodeFocusBytes(exports: GhosttyWasmExports, gained: boolean): Uint8Array {
+  const bufLen = 16;
+  const buf = exports.ghostty_wasm_alloc(bufLen + 4);
+  try {
+    const written = buf + bufLen;
+    const r = exports.ghostty_focus_encode(
+      gained ? GhosttyFocusEvent.GAINED : GhosttyFocusEvent.LOST,
+      buf,
+      bufLen,
+      written
+    );
+    if (r !== GhosttyResult.SUCCESS) {
+      throw new Error(`ghostty_focus_encode failed: ${GhosttyResult[r] ?? r}`);
+    }
+    const n = new DataView(exports.memory.buffer).getUint32(written, true);
+    return new Uint8Array(exports.memory.buffer, buf, n).slice();
+  } finally {
+    exports.ghostty_wasm_free(buf, bufLen + 4);
+  }
+}
+
 const pasteLocations: Record<ClipboardLocation, GhosttyClipboardLocation> = {
   standard: GhosttyClipboardLocation.STANDARD,
   selection: GhosttyClipboardLocation.SELECTION,
@@ -149,6 +172,14 @@ export class Ghostty {
   constructor(wasmInstance: WebAssembly.Instance) {
     this.exports = wasmInstance.exports as GhosttyWasmExports;
     this.memory = this.exports.memory;
+  }
+
+  /**
+   * Encode a focus report (CSI I when gained, CSI O when lost) for mode 1004.
+   * Needs no terminal; GhosttyTerminal.encodeFocus() adds the mode check.
+   */
+  encodeFocus(gained: boolean): Uint8Array {
+    return encodeFocusBytes(this.exports, gained);
   }
 
   /** Version of the loaded libghostty-vt (`ghostty_version()`), e.g. "1.0.0". */
@@ -2383,6 +2414,15 @@ export class GhosttyTerminal {
   hasFocusEvents(): boolean {
     // Mode 1004 = focus events (DEC mode)
     return this.getMode(1004, false);
+  }
+
+  /**
+   * Bytes to send when the terminal gained or lost focus: CSI I / CSI O from
+   * ghostty_focus_encode() if the program turned on mode 1004, else empty.
+   */
+  encodeFocus(gained: boolean): Uint8Array {
+    if (!this.hasFocusEvents()) return new Uint8Array(0);
+    return encodeFocusBytes(this.exports, gained);
   }
 
   hasMouseTracking(): boolean {

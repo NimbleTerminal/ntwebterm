@@ -152,6 +152,9 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   /** `position` is a GhosttyMousePosition passed by value: wasm32 passes a pointer to { x: f32, y: f32 }. */
   ghostty_mouse_event_set_position(event: number, positionPtr: number): number;
 
+  // Focus reporting (ghostty/include/ghostty/vt/focus.h)
+  ghostty_focus_encode(event: number, bufPtr: number, bufLen: number, writtenPtr: number): number;
+
   // Paste (ghostty/include/ghostty/vt/paste.h)
   ghostty_terminal_paste(terminal: number, paste: number, outPasted: number): number;
 
