@@ -691,7 +691,6 @@ export class Terminal implements ITerminalCore {
       // canvas + destroyed old renderer after a swap.
       const mouseConfig: MouseTrackingConfig = {
         hasMouseTracking: () => this.wasmTerm?.hasMouseTracking() ?? false,
-        hasSgrMouseMode: () => this.wasmTerm?.getMode(1006, false) ?? true, // SGR extended mode
         getCellDimensions: () => {
           if (!this.renderer) return { width: 0, height: 0 };
           const m = this.renderer.getMetrics();

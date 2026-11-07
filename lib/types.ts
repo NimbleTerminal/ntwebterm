@@ -25,6 +25,8 @@ import {
   GhosttyKittyGraphicsPlacementIteratorOption as KittyGraphicsPlacementIteratorOption,
   GhosttyKittyImageCompression as KittyImageCompression,
   GhosttyKittyImageFormat as KittyImageFormat,
+  GhosttyMouseAction as MouseAction,
+  GhosttyMouseButton as MouseButton,
   GhosttyPointTag as PointTag,
   GhosttyRenderStateData as RenderStateData,
   GhosttyRenderStateOption as RenderStateOption,
@@ -54,6 +56,8 @@ export {
   KittyGraphicsPlacementIteratorOption,
   KittyImageCompression,
   KittyImageFormat,
+  MouseAction,
+  MouseButton,
   PointTag,
   RenderStateData,
   RenderStateOption,
@@ -125,6 +129,28 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   // Build info (constant for the lifetime of the module)
   ghostty_version(): number;
   ghostty_build_info(data: number, out: number): number;
+
+  // Mouse encoder (ghostty/include/ghostty/vt/mouse)
+  ghostty_mouse_encoder_new(allocator: number, encoderPtrPtr: number): number;
+  ghostty_mouse_encoder_free(encoder: number): void;
+  ghostty_mouse_encoder_set(encoder: number, option: number, valuePtr: number): number;
+  ghostty_mouse_encoder_set_from_terminal(encoder: number, terminal: TerminalHandle): number;
+  ghostty_mouse_encoder_reset(encoder: number): number;
+  ghostty_mouse_encoder_encode(
+    encoder: number,
+    eventPtr: number,
+    bufPtr: number,
+    bufLen: number,
+    writtenPtr: number
+  ): number;
+  ghostty_mouse_event_new(allocator: number, eventPtrPtr: number): number;
+  ghostty_mouse_event_free(event: number): void;
+  ghostty_mouse_event_set_action(event: number, action: number): number;
+  ghostty_mouse_event_set_button(event: number, button: number): number;
+  ghostty_mouse_event_clear_button(event: number): number;
+  ghostty_mouse_event_set_mods(event: number, mods: number): number;
+  /** `position` is a GhosttyMousePosition passed by value: wasm32 passes a pointer to { x: f32, y: f32 }. */
+  ghostty_mouse_event_set_position(event: number, positionPtr: number): number;
 
   // Paste (ghostty/include/ghostty/vt/paste.h)
   ghostty_terminal_paste(terminal: number, paste: number, outPasted: number): number;
@@ -840,6 +866,23 @@ export interface ResizeRequest {
 
 /** Answer to a CSI ? 996 n color scheme query. Mirrors GhosttyColorScheme. */
 export type ColorScheme = 'light' | 'dark';
+
+/** A normalized mouse event for GhosttyTerminal.encodeMouse(). */
+export interface MouseReport {
+  action: MouseAction;
+  /** Button pressed or released, the button held during drag motion, or null for hover motion. */
+  button: MouseButton | null;
+  /** GhosttyMods bitmask (`Mods.SHIFT | Mods.ALT | ...`). */
+  mods: number;
+  /** Zero-based logical cell under the pointer. */
+  col: number;
+  row: number;
+  /** Pointer offset inside the cell in pixels, reported by SGR-pixels (mode 1016). Defaults to the cell centre. */
+  xInCell?: number;
+  yInCell?: number;
+  /** Whether any button is held; button-event tracking (mode 1002) reports motion only then. */
+  anyButtonPressed: boolean;
+}
 
 /** Outcome of a paste: written to the PTY, nothing to write, or refused as unsafe. */
 export type PasteResult = 'pasted' | 'empty' | 'rejected';

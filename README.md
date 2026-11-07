@@ -225,6 +225,22 @@ const term = new Terminal({
 The low-level `GhosttyTerminal.paste(text, { allowUnsafe, source, location })` returns
 `'pasted'`, `'empty'` or `'rejected'` and queues the PTY bytes for `readResponse()`.
 
+### Mouse reporting
+
+Mouse reports are encoded by libghostty-vt's mouse encoder
+(`ghostty_mouse_encoder_*`). It reads the tracking mode (X10, normal, button,
+any-event) and the output format (X10, UTF-8, SGR, urxvt, SGR-pixels) from the
+terminal, drops events the mode does not report, and deduplicates motion within
+a cell. TypeScript only turns the DOM event into a cell, a button and modifiers:
+hit-testing uses the renderer's fractional cell metrics and BiDi visual-to-logical
+mapping, and the encoder receives a pixel position inside that cell so SGR-pixels
+(mode 1016) keeps the pointer's offset. Modifier bits follow xterm: Shift adds 4,
+Alt/Option 8 and Ctrl 16. Wheel reports buttons 64/65 vertically and 66/67
+horizontally.
+
+`GhosttyTerminal.encodeMouse(report)` exposes the encoder for custom input
+pipelines; `MouseEncoder` is the raw binding.
+
 ### Program status (OSC 7501)
 
 Subscribe to structured program-status reports from applications:

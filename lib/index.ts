@@ -75,11 +75,12 @@ export {
   Ghostty,
   GhosttyTerminal,
   KeyEncoder,
+  MouseEncoder,
   CellFlags,
   DirtyState,
   KeyEncoderOption,
 } from './ghostty';
-export { Key, KeyAction, Mods } from './types';
+export { Key, KeyAction, Mods, MouseAction, MouseButton } from './types';
 export type {
   ClipboardContent,
   ClipboardLocation,
@@ -93,6 +94,7 @@ export type {
   SemanticPromptEvent,
   ProgramStatusReport,
   LibghosttyBuildInfo,
+  MouseReport,
   PasteOptions,
   PasteResult,
   KeyEvent,

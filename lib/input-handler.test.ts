@@ -1283,6 +1283,10 @@ describe('InputHandler', () => {
     });
 
     test('any-event mouse tracking reports button 35 on hover and deduplicates same-cell motion', () => {
+      // The encoder reads mode 1003 / 1006 from the terminal itself.
+      const wasmTerm = ghostty.createTerminal(80, 24);
+      wasmTerm.setCellPixelSize(10, 20);
+      wasmTerm.write('\x1b[?1003h\x1b[?1006h');
       const handler = new InputHandler(
         ghostty,
         container as any,
@@ -1290,16 +1294,15 @@ describe('InputHandler', () => {
         () => {},
         undefined,
         undefined,
-        (mode) => mode === 1003,
+        undefined,
         undefined,
         undefined,
         {
-          hasMouseTracking: () => true,
-          getMouseTrackingMode: () => 'any',
-          hasSgrMouseMode: () => true,
+          hasMouseTracking: () => wasmTerm.hasMouseTracking(),
           getCellDimensions: () => ({ width: 10, height: 20 }),
           getCanvasOffset: () => ({ left: 0, top: 0 }),
-        }
+        },
+        () => wasmTerm
       );
 
       container.dispatchEvent(
@@ -1316,6 +1319,7 @@ describe('InputHandler', () => {
 
       expect(dataReceived).toEqual(['\x1b[<35;2;2M', '\x1b[<35;3;2M']);
       handler.dispose();
+      wasmTerm.free();
     });
   });
 
@@ -1330,7 +1334,6 @@ describe('InputHandler', () => {
       // Row 0 is `aשלוb` → visual col 3 holds logical col 1.
       (handler as any).mouseConfig = {
         hasMouseTracking: () => true,
-        hasSgrMouseMode: () => true,
         getCellDimensions: () => ({ width: 10, height: 20 }),
         getCanvasOffset: () => ({ left: 0, top: 0 }),
         visualToLogicalCol: (col: number, _row: number) => [0, 3, 2, 1, 4][col] ?? col,
@@ -1338,7 +1341,7 @@ describe('InputHandler', () => {
       const cell = (handler as any).pixelToCell(
         new MouseEvent('mousedown', { clientX: 35, clientY: 5 }) // visual col 3, row 0
       );
-      expect(cell).toEqual({ col: 2, row: 1 }); // logical col 1 → 1-based 2
+      expect(cell).toMatchObject({ col: 2, row: 1 }); // logical col 1 → 1-based 2
       handler.dispose();
     });
 
@@ -1351,14 +1354,13 @@ describe('InputHandler', () => {
       );
       (handler as any).mouseConfig = {
         hasMouseTracking: () => true,
-        hasSgrMouseMode: () => true,
         getCellDimensions: () => ({ width: 10, height: 20 }),
         getCanvasOffset: () => ({ left: 0, top: 0 }),
       };
       const cell = (handler as any).pixelToCell(
         new MouseEvent('mousedown', { clientX: 35, clientY: 5 })
       );
-      expect(cell).toEqual({ col: 4, row: 1 });
+      expect(cell).toMatchObject({ col: 4, row: 1 });
       handler.dispose();
     });
   });

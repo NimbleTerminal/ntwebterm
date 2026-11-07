@@ -15,7 +15,7 @@
 
 import type { Ghostty, GhosttyTerminal, KeyEncoder } from './ghostty';
 import type { IKeyEvent } from './interfaces';
-import { Key, KeyAction, KeyEncoderOption, Mods } from './types';
+import { Key, KeyAction, KeyEncoderOption, Mods, MouseAction, MouseButton } from './types';
 
 /**
  * Map KeyboardEvent.code values to USB HID Key enum values
@@ -163,8 +163,6 @@ const KEY_MAP: Record<string, Key> = {
 export interface MouseTrackingConfig {
   /** Check if any mouse tracking mode is enabled */
   hasMouseTracking: () => boolean;
-  /** Check if SGR extended mouse mode is enabled (mode 1006) */
-  hasSgrMouseMode: () => boolean;
   /** Get cell dimensions for pixel to cell conversion */
   getCellDimensions: () => { width: number; height: number };
   /** Get canvas/container offset for accurate position calculation */
@@ -206,10 +204,7 @@ export class InputHandler {
   private wheelListener: ((e: WheelEvent) => void) | null = null;
   private isComposing = false;
   private isDisposed = false;
-  private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
-  private lastMouseMoveCol = -1;
-  private lastMouseMoveRow = -1;
-  private lastMouseMoveButton = -1;
+  private mouseButtonsPressed = 0; // Bit per DOM button index, for drag motion reports
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
   private lastPasteData: string | null = null;
@@ -817,9 +812,14 @@ export class InputHandler {
   // ==========================================================================
 
   /**
-   * Convert pixel coordinates to terminal cell coordinates
+   * Convert a pointer position to the terminal cell under it (1-based) and
+   * the pointer's offset inside that cell in pixels. Uses the renderer's
+   * fractional cell metrics so wide terminals do not drift by a column, and
+   * maps visual to logical columns on BiDi rows.
    */
-  private pixelToCell(event: MouseEvent): { col: number; row: number } | null {
+  private pixelToCell(
+    event: MouseEvent
+  ): { col: number; row: number; xInCell: number; yInCell: number } | null {
     if (!this.mouseConfig) return null;
 
     const dims = this.mouseConfig.getCellDimensions();
@@ -832,6 +832,8 @@ export class InputHandler {
 
     let col = Math.floor(x / dims.width);
     const row = Math.floor(y / dims.height);
+    const xInCell = x - col * dims.width;
+    const yInCell = y - row * dims.height;
     if (this.mouseConfig.visualToLogicalCol && col >= 0 && row >= 0) {
       col = this.mouseConfig.visualToLogicalCol(col, row);
     }
@@ -840,75 +842,61 @@ export class InputHandler {
     return {
       col: Math.max(1, col + 1),
       row: Math.max(1, row + 1),
+      xInCell,
+      yInCell,
     };
   }
 
-  /**
-   * Get modifier flags for mouse event
-   */
-  private getMouseModifiers(event: MouseEvent): number {
-    let mods = 0;
-    if (event.shiftKey) mods |= 4;
-    if (event.metaKey) mods |= 8; // Meta (Cmd on Mac)
-    if (event.ctrlKey) mods |= 16;
+  /** GhosttyMods for a mouse event; upstream turns these into the report's modifier bits. */
+  private mouseMods(event: MouseEvent): number {
+    let mods = Mods.NONE;
+    if (event.shiftKey) mods |= Mods.SHIFT;
+    if (event.ctrlKey) mods |= Mods.CTRL;
+    if (event.altKey) mods |= Mods.ALT;
+    if (event.metaKey) mods |= Mods.SUPER;
     return mods;
   }
 
-  /**
-   * Encode mouse event as SGR sequence
-   * SGR format: \x1b[<Btn;Col;RowM (press/motion) or \x1b[<Btn;Col;Rowm (release)
-   */
-  private encodeMouseSGR(
-    button: number,
-    col: number,
-    row: number,
-    isRelease: boolean,
-    modifiers: number
-  ): string {
-    const btn = button + modifiers;
-    const suffix = isRelease ? 'm' : 'M';
-    return `\x1b[<${btn};${col};${row}${suffix}`;
+  /** DOM button index to the upstream button; back/forward are xterm buttons 8 and 9. */
+  private static readonly DOM_BUTTONS: readonly MouseButton[] = [
+    MouseButton.LEFT,
+    MouseButton.MIDDLE,
+    MouseButton.RIGHT,
+    MouseButton.EIGHT,
+    MouseButton.NINE,
+  ];
+
+  /** The button to report with drag motion: left, then middle, then right; null when none is held. */
+  private heldButton(): MouseButton | null {
+    if (this.mouseButtonsPressed & 1) return MouseButton.LEFT;
+    if (this.mouseButtonsPressed & 2) return MouseButton.MIDDLE;
+    if (this.mouseButtonsPressed & 4) return MouseButton.RIGHT;
+    return null;
   }
 
   /**
-   * Encode mouse event as X10/normal sequence (legacy format)
-   * Format: \x1b[M<Btn+32><Col+32><Row+32>
+   * Encode a mouse report through libghostty-vt and send it. The encoder reads
+   * the tracking mode and format from the terminal, drops events the mode does
+   * not report, and deduplicates motion within a cell. Returns false when the
+   * event could not be mapped to a cell.
    */
-  private encodeMouseX10(button: number, col: number, row: number, modifiers: number): string {
-    // X10 format adds 32 to all values and encodes as characters
-    // Button encoding: 0=left, 1=middle, 2=right, 3=release
-    const btn = button + modifiers + 32;
-    const colChar = String.fromCharCode(Math.min(col + 32, 255));
-    const rowChar = String.fromCharCode(Math.min(row + 32, 255));
-    return `\x1b[M${String.fromCharCode(btn)}${colChar}${rowChar}`;
-  }
-
-  /**
-   * Send mouse event to terminal
-   */
-  private sendMouseEvent(
-    button: number,
-    col: number,
-    row: number,
-    isRelease: boolean,
-    event: MouseEvent
-  ): void {
-    const modifiers = this.getMouseModifiers(event);
-
-    // Check if SGR extended mode is enabled (mode 1006)
-    const useSGR = this.mouseConfig?.hasSgrMouseMode?.() ?? true;
-
-    let sequence: string;
-    if (useSGR) {
-      sequence = this.encodeMouseSGR(button, col, row, isRelease, modifiers);
-    } else {
-      // X10/normal mode doesn't support release events directly
-      // Button 3 means release in X10 mode
-      const x10Button = isRelease ? 3 : button;
-      sequence = this.encodeMouseX10(x10Button, col, row, modifiers);
-    }
-
-    this.onDataCallback(sequence);
+  private reportMouse(action: MouseAction, button: MouseButton | null, event: MouseEvent): boolean {
+    const term = this.getTerminalCallback?.();
+    if (!term) return false;
+    const cell = this.pixelToCell(event);
+    if (!cell) return false;
+    const bytes = term.encodeMouse({
+      action,
+      button,
+      mods: this.mouseMods(event),
+      col: cell.col - 1,
+      row: cell.row - 1,
+      xInCell: cell.xInCell,
+      yInCell: cell.yInCell,
+      anyButtonPressed: this.mouseButtonsPressed !== 0,
+    });
+    if (bytes.length > 0) this.onDataCallback(new TextDecoder().decode(bytes));
+    return true;
   }
 
   /**
@@ -918,25 +906,11 @@ export class InputHandler {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
-    const cell = this.pixelToCell(event);
-    if (!cell) return;
-
-    // Map browser button to terminal button
-    // event.button: 0=left, 1=middle, 2=right
-    // Terminal: 0=left, 1=middle, 2=right
-    const button = event.button;
-
-    // Track pressed buttons for motion events
-    this.mouseButtonsPressed |= 1 << button;
-    this.lastMouseMoveCol = -1;
-    this.lastMouseMoveRow = -1;
-    this.lastMouseMoveButton = -1;
-
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    this.mouseButtonsPressed |= 1 << event.button;
+    const button = InputHandler.DOM_BUTTONS[event.button] ?? MouseButton.UNKNOWN;
+    this.reportMouse(MouseAction.PRESS, button, event);
 
     // Don't prevent default - let SelectionManager handle selection
-    // Only prevent if we actually handled the event
-    // event.preventDefault();
   }
 
   /**
@@ -946,78 +920,38 @@ export class InputHandler {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
-    const cell = this.pixelToCell(event);
-    if (!cell) return;
-
-    const button = event.button;
-
-    // Clear pressed button
-    this.mouseButtonsPressed &= ~(1 << button);
-    this.lastMouseMoveCol = -1;
-    this.lastMouseMoveRow = -1;
-    this.lastMouseMoveButton = -1;
-
-    this.sendMouseEvent(button, cell.col, cell.row, true, event);
+    this.mouseButtonsPressed &= ~(1 << event.button);
+    const button = InputHandler.DOM_BUTTONS[event.button] ?? MouseButton.UNKNOWN;
+    this.reportMouse(MouseAction.RELEASE, button, event);
   }
 
   /**
-   * Handle mousemove event
+   * Handle mousemove event. Whether motion is reported at all (modes 1002 and
+   * 1003) and same-cell deduplication are decided by the encoder.
    */
   private handleMouseMove(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
-    // Check if button motion mode or any-event tracking is enabled
-    // Mode 1002 = button motion, Mode 1003 = any motion
-    const hasButtonMotion = this.getModeCallback?.(1002) ?? false;
-    const hasAnyMotion = this.getModeCallback?.(1003) ?? false;
-
-    if (!hasButtonMotion && !hasAnyMotion) return;
-
-    // In button motion mode, only report if a button is pressed
-    if (hasButtonMotion && !hasAnyMotion && this.mouseButtonsPressed === 0) return;
-
-    const cell = this.pixelToCell(event);
-    if (!cell) return;
-
-    // Determine which button to report (35 = 32 + 3 for motion with no button)
-    let button = 32; // Motion flag
-    if (this.mouseButtonsPressed & 1)
-      button += 0; // Left
-    else if (this.mouseButtonsPressed & 2)
-      button += 1; // Middle
-    else if (this.mouseButtonsPressed & 4)
-      button += 2; // Right
-    else button += 3; // No button pressed (hover in mode 1003)
-
-    if (
-      cell.col === this.lastMouseMoveCol &&
-      cell.row === this.lastMouseMoveRow &&
-      button === this.lastMouseMoveButton
-    ) {
-      return;
-    }
-    this.lastMouseMoveCol = cell.col;
-    this.lastMouseMoveRow = cell.row;
-    this.lastMouseMoveButton = button;
-
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    this.reportMouse(MouseAction.MOTION, this.heldButton(), event);
   }
 
   /**
-   * Handle wheel event (scroll)
+   * Handle wheel event (scroll): buttons 4/5 vertically, 6/7 horizontally.
    */
   private handleWheel(event: WheelEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
-    const cell = this.pixelToCell(event);
-    if (!cell) return;
-
-    // Wheel events: button 64 = scroll up, button 65 = scroll down
-    const button = event.deltaY < 0 ? 64 : 65;
-
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+    const button = horizontal
+      ? event.deltaX < 0
+        ? MouseButton.SIX
+        : MouseButton.SEVEN
+      : event.deltaY < 0
+        ? MouseButton.FOUR
+        : MouseButton.FIVE;
+    if (!this.reportMouse(MouseAction.PRESS, button, event)) return;
 
     // Prevent default scrolling when mouse tracking is active
     event.preventDefault();

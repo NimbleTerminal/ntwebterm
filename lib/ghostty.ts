@@ -25,6 +25,9 @@ import {
   GhosttyGridRefLayout,
   GhosttyKittyGraphicsPlacementRenderInfoLayout,
   GhosttyMimeReaderLayout,
+  GhosttyMouseEncoderOption,
+  GhosttyMouseEncoderSizeLayout,
+  GhosttyMousePositionLayout,
   GhosttyOptimizeMode,
   GhosttyPasteLayout,
   GhosttyPasteSource,
@@ -76,6 +79,7 @@ import {
   type KittyKeyFlags,
   type KittyPlacementInfo,
   type LibghosttyBuildInfo,
+  type MouseReport,
   type PasteOptions,
   type PasteResult,
   PointTag,
@@ -449,6 +453,168 @@ let nextImageRevision = 0;
  * - ONE call to get all cells (getViewport)
  * - No per-row WASM boundary crossings!
  */
+/**
+ * Binding for libghostty-vt's mouse encoder (ghostty_mouse_encoder_*). It owns
+ * one reusable GhosttyMouseEvent. GhosttyTerminal.encodeMouse() keeps the
+ * encoder in sync with the terminal; use this directly only for custom input
+ * pipelines.
+ */
+export class MouseEncoder {
+  private exports: GhosttyWasmExports;
+  private encoder = 0;
+  private event = 0;
+
+  constructor(exports: GhosttyWasmExports) {
+    this.exports = exports;
+    this.encoder = this.newOpaque(
+      (out) => exports.ghostty_mouse_encoder_new(0, out),
+      'mouse encoder'
+    );
+    try {
+      this.event = this.newOpaque((out) => exports.ghostty_mouse_event_new(0, out), 'mouse event');
+    } catch (e) {
+      exports.ghostty_mouse_encoder_free(this.encoder);
+      throw e;
+    }
+    // Upstream drops motion reports that stay in the previously reported cell.
+    this.setTrackLastCell(true);
+  }
+
+  private newOpaque(create: (outPtrPtr: number) => number, what: string): number {
+    const ptrPtr = this.exports.ghostty_wasm_alloc_opaque();
+    try {
+      const r = create(ptrPtr);
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(`Failed to create ${what}: ${GhosttyResult[r] ?? r}`);
+      }
+      return new DataView(this.exports.memory.buffer).getUint32(ptrPtr, true);
+    } finally {
+      this.exports.ghostty_wasm_free_opaque(ptrPtr);
+    }
+  }
+
+  private setOption(
+    option: GhosttyMouseEncoderOption,
+    size: number,
+    write: (view: DataView, ptr: number) => void
+  ): void {
+    const ptr = this.exports.ghostty_wasm_alloc(size);
+    try {
+      const view = new DataView(this.exports.memory.buffer);
+      for (let i = 0; i < size; i++) view.setUint8(ptr + i, 0);
+      write(view, ptr);
+      const r = this.exports.ghostty_mouse_encoder_set(this.encoder, option, ptr);
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(
+          `ghostty_mouse_encoder_set(${GhosttyMouseEncoderOption[option]}) failed: ${GhosttyResult[r] ?? r}`
+        );
+      }
+    } finally {
+      this.exports.ghostty_wasm_free(ptr, size);
+    }
+  }
+
+  /** Deduplicate motion by last reported cell (GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL). */
+  setTrackLastCell(enabled: boolean): void {
+    this.setOption(GhosttyMouseEncoderOption.TRACK_LAST_CELL, 1, (v, p) =>
+      v.setUint8(p, enabled ? 1 : 0)
+    );
+  }
+
+  /** Whether any button is held, which button-event tracking needs for motion. */
+  setAnyButtonPressed(pressed: boolean): void {
+    this.setOption(GhosttyMouseEncoderOption.ANY_BUTTON_PRESSED, 1, (v, p) =>
+      v.setUint8(p, pressed ? 1 : 0)
+    );
+  }
+
+  /** Screen and cell geometry in pixels (GhosttyMouseEncoderSize). Cells must be non-zero. */
+  setSize(size: {
+    screenWidth: number;
+    screenHeight: number;
+    cellWidth: number;
+    cellHeight: number;
+    padding?: { top?: number; bottom?: number; left?: number; right?: number };
+  }): void {
+    const L = GhosttyMouseEncoderSizeLayout;
+    this.setOption(GhosttyMouseEncoderOption.SIZE, L.size, (v, p) => {
+      v.setUint32(p + L.offset.size, L.size, true);
+      v.setUint32(p + L.offset.screen_width, size.screenWidth, true);
+      v.setUint32(p + L.offset.screen_height, size.screenHeight, true);
+      v.setUint32(p + L.offset.cell_width, size.cellWidth, true);
+      v.setUint32(p + L.offset.cell_height, size.cellHeight, true);
+      v.setUint32(p + L.offset.padding_top, size.padding?.top ?? 0, true);
+      v.setUint32(p + L.offset.padding_bottom, size.padding?.bottom ?? 0, true);
+      v.setUint32(p + L.offset.padding_right, size.padding?.right ?? 0, true);
+      v.setUint32(p + L.offset.padding_left, size.padding?.left ?? 0, true);
+    });
+  }
+
+  /** Read tracking mode and output format from the terminal. Also forgets the last reported cell. */
+  setFromTerminal(terminal: TerminalHandle): void {
+    const r = this.exports.ghostty_mouse_encoder_set_from_terminal(this.encoder, terminal);
+    if (r !== GhosttyResult.SUCCESS) {
+      throw new Error(`ghostty_mouse_encoder_set_from_terminal failed: ${GhosttyResult[r] ?? r}`);
+    }
+  }
+
+  /** Forget the last reported cell. */
+  reset(): void {
+    this.exports.ghostty_mouse_encoder_reset(this.encoder);
+  }
+
+  /**
+   * Encode one event at a surface-space pixel position. Returns the bytes to
+   * send to the PTY; empty when the tracking mode does not report this event.
+   */
+  encode(action: number, button: number | null, mods: number, x: number, y: number): Uint8Array {
+    const ex = this.exports;
+    ex.ghostty_mouse_event_set_action(this.event, action);
+    if (button === null) ex.ghostty_mouse_event_clear_button(this.event);
+    else ex.ghostty_mouse_event_set_button(this.event, button);
+    ex.ghostty_mouse_event_set_mods(this.event, mods);
+
+    const posSize = GhosttyMousePositionLayout.size;
+    const pos = ex.ghostty_wasm_alloc(posSize);
+    try {
+      const view = new DataView(ex.memory.buffer);
+      view.setFloat32(pos + GhosttyMousePositionLayout.offset.x, x, true);
+      view.setFloat32(pos + GhosttyMousePositionLayout.offset.y, y, true);
+      ex.ghostty_mouse_event_set_position(this.event, pos);
+    } finally {
+      ex.ghostty_wasm_free(pos, posSize);
+    }
+
+    // 128 bytes covers every format; grow once if upstream asks for more.
+    let bufLen = 128;
+    for (;;) {
+      const buf = ex.ghostty_wasm_alloc(bufLen + 4);
+      const written = buf + bufLen;
+      try {
+        const r = ex.ghostty_mouse_encoder_encode(this.encoder, this.event, buf, bufLen, written);
+        const n = new DataView(ex.memory.buffer).getUint32(written, true);
+        if (r === GhosttyResult.SUCCESS) return new Uint8Array(ex.memory.buffer, buf, n).slice();
+        if (r !== GhosttyResult.OUT_OF_SPACE) {
+          throw new Error(`ghostty_mouse_encoder_encode failed: ${GhosttyResult[r] ?? r}`);
+        }
+        bufLen = n;
+      } finally {
+        ex.ghostty_wasm_free(buf, bufLen + 4);
+      }
+    }
+  }
+
+  free(): void {
+    if (this.event) this.exports.ghostty_mouse_event_free(this.event);
+    if (this.encoder) this.exports.ghostty_mouse_encoder_free(this.encoder);
+    this.event = 0;
+    this.encoder = 0;
+  }
+}
+
+/** DEC private modes that select the mouse tracking mode and report format. */
+const MOUSE_MODES = [9, 1000, 1002, 1003, 1005, 1006, 1015, 1016] as const;
+
 export class GhosttyTerminal {
   private imageRevisions = new Map<number, { generation: bigint; revision: number }>();
   private imageEpoch = 0;
@@ -546,6 +712,12 @@ export class GhosttyTerminal {
   private clipboardReadHandler?: ClipboardReadHandler;
   /** Text handed to the GhosttyMimeReader during paste(); null otherwise. */
   private pendingPasteBytes: Uint8Array | null = null;
+
+  // Mouse reporting state; see encodeMouse().
+  private mouseEncoder?: MouseEncoder;
+  private mouseModeSignature = -1;
+  private mouseSizeKey = '';
+  private mouseAnyButtonPressed = false;
   private pwdChangeHandler?: (pwd: string) => void;
   private pendingPwdChanges: string[] = [];
   private notificationHandler?: (notification: DesktopNotification) => void;
@@ -1526,6 +1698,8 @@ export class GhosttyTerminal {
     }
     this.renderImages?.dispose();
     this.renderImages = undefined;
+    this.mouseEncoder?.free();
+    this.mouseEncoder = undefined;
     this.exports.ghostty_terminal_free(this.handle);
   }
 
@@ -2150,6 +2324,60 @@ export class GhosttyTerminal {
       this.pendingPasteBytes = null;
       this.exports.ghostty_wasm_free(buf, total);
     }
+  }
+
+  /**
+   * Encode a mouse report the way the program asked for it. libghostty-vt
+   * reads the tracking mode (X10, normal, button, any) and format (X10,
+   * UTF-8, SGR, urxvt, SGR-pixels) from this terminal, drops events the mode
+   * does not report, and deduplicates motion within a cell. Returns the bytes
+   * to send to the PTY, empty when there is nothing to report.
+   *
+   * The cell comes from the caller because hit-testing with fractional CSS
+   * cell metrics and BiDi column mapping is the renderer's business; the
+   * encoder sees a pixel position inside that cell built from the integer
+   * cell size it was given.
+   */
+  encodeMouse(report: MouseReport): Uint8Array {
+    this.mouseEncoder ??= new MouseEncoder(this.exports);
+    const encoder = this.mouseEncoder;
+
+    // Tracking mode and format live in the terminal. Re-read them only when
+    // one of the controlling modes flipped: set_from_terminal also forgets the
+    // last reported cell, which would defeat motion deduplication.
+    let signature = 0;
+    for (const mode of MOUSE_MODES) {
+      signature = (signature << 1) | (this.getMode(mode, false) ? 1 : 0);
+    }
+    if (signature !== this.mouseModeSignature) {
+      encoder.setFromTerminal(this.handle);
+      this.mouseModeSignature = signature;
+    }
+
+    const cw = Math.max(1, this.cellWidthPx);
+    const ch = Math.max(1, this.cellHeightPx);
+    const sizeKey = `${this._cols}x${this._rows}@${cw}x${ch}`;
+    if (sizeKey !== this.mouseSizeKey) {
+      encoder.setSize({
+        screenWidth: this._cols * cw,
+        screenHeight: this._rows * ch,
+        cellWidth: cw,
+        cellHeight: ch,
+      });
+      this.mouseSizeKey = sizeKey;
+    }
+
+    if (report.anyButtonPressed !== this.mouseAnyButtonPressed) {
+      encoder.setAnyButtonPressed(report.anyButtonPressed);
+      this.mouseAnyButtonPressed = report.anyButtonPressed;
+    }
+
+    // Keep the position inside the requested cell whatever offset was given.
+    const inside = (offset: number | undefined, extent: number) =>
+      Math.min(Math.max(offset ?? extent / 2, 0), extent - 0.01);
+    const x = report.col * cw + inside(report.xInCell, cw);
+    const y = report.row * ch + inside(report.yInCell, ch);
+    return encoder.encode(report.action, report.button, report.mods, x, y);
   }
 
   hasFocusEvents(): boolean {
