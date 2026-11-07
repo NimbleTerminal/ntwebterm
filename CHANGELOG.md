@@ -7,6 +7,7 @@
 - Wire the libghostty-vt effect callbacks: OSC 52/5522 clipboard writes go to the browser clipboard by default (`clipboardWrite` option, `onClipboardWrite`), clipboard reads are refused unless a synchronous `clipboardRead` handler is supplied, and `onPwdChange`/`term.pwd`, `onNotification`, `onProgress`, `onSemanticPrompt` and `onResizeRequest` expose OSC 7, OSC 9/777, OSC 9;4, OSC 133 and CSI 8 t. CSI ? 996 n is answered from the theme (`colorScheme` option).
 - Add `forwardNotificationsToBrowser()`, a reference implementation that shows OSC 9/777 notifications through the browser Notification API without prompting unless asked.
 - Export `writeTextToClipboard()`, the clipboard strategy shared by selection copy and OSC 52.
+- Generate the libghostty-vt ABI bindings (`lib/ghostty-abi.ts`) from upstream's frozen manifest with `bun run gen:abi`, and add drift tests that compare the generated file, the built WASM's `ghostty_type_json()` and upstream's `symbols.txt`.
 
 ### Changed
 
@@ -14,6 +15,7 @@
 - Follow the 1.0 ABI in the TypeScript bindings: renumbered option enums (`_INVALID = 0` sentinels), `ghostty_key_encoder_set*` renames, `GhosttyString`-by-value key text, the 16-byte `GhosttyStyle`, size-less callback payloads and grid references, `GhosttyCodepointBuffer` grapheme reads, and the `PIXELS`/`EXPECTED_LEN` Kitty image keys.
 - Lift the upstream scrollback byte budget with `SIZE_MAX`; a NULL value now restores the 10,000-byte default instead of removing it.
 - Drop the recycled-row clearing hunk from the patch, since upstream now zeroes recycled rows itself.
+- `Key`, `KeyEncoderOption` and `DirtyState` now use upstream's member names (`DIGIT_0`, `ARROW_UP`, `NUMPAD_ADD`, `BACKQUOTE`, `KITTY_FLAGS`, `FALSE`); the previous names remain as deprecated aliases. Struct offsets in the WASM bridge come from the generated `*Layout` constants instead of literals.
 
 ## 0.4.2
 

@@ -1,51 +1,72 @@
 /**
- * Layout of GhosttyStyle on wasm32 (libghostty-vt 1.0 frozen ABI), 16 bytes:
- *   fg_color@0, bg_color@4, underline_color@8 (GhosttyStyleColor, 4 bytes
- *   each: tag:u8@0 then the value: palette index@1 or rgb@1..3),
- *   flags:u16@12 (GhosttyStyleFlags), reserved:u16@14.
- */
-export const GHOSTTY_STYLE_SIZE = 16;
-
-/**
- * Layout of GhosttyGridRef on wasm32 (frozen ABI), 8 bytes:
- * node:ptr@0, x:u16@4, y:u16@6.
- */
-export const GRID_REF_SIZE = 8;
-
-/**
- * Layout of GhosttyCodepointBuffer on wasm32, 12 bytes: ptr:u32@0 (uint32_t*),
- * cap:size_t@4 (elements ptr can hold), len:size_t@8 (set by the library to
- * the total codepoint count, whether or not they all fit).
- */
-export const CODEPOINT_BUFFER_SIZE = 12;
-export const CODEPOINT_BUFFER_CAP_OFFSET = 4;
-export const CODEPOINT_BUFFER_LEN_OFFSET = 8;
-export const GRID_REF_X_OFFSET = 4;
-export const GHOSTTY_STYLE_FG_COLOR_OFFSET = 0;
-export const GHOSTTY_STYLE_BG_COLOR_OFFSET = 4;
-export const GHOSTTY_STYLE_FLAGS_OFFSET = 12;
-
-/**
- * Bits of GhosttyStyleFlags. Mirrors GHOSTTY_STYLE_FLAG_* and the underline
- * field selected by GHOSTTY_STYLE_UNDERLINE_SHIFT / _MASK.
- */
-export enum StyleFlag {
-  BOLD = 1 << 0,
-  ITALIC = 1 << 1,
-  FAINT = 1 << 2,
-  BLINK = 1 << 3,
-  INVERSE = 1 << 4,
-  INVISIBLE = 1 << 5,
-  STRIKETHROUGH = 1 << 6,
-  OVERLINE = 1 << 7,
-  UNDERLINE_SHIFT = 8,
-  UNDERLINE_MASK = 0x7 << 8,
-}
-
-/**
  * TypeScript type definitions for libghostty-vt WASM API
  * Based on include/ghostty/vt/*.h from Ghostty repository
  */
+
+// ============================================================================
+// libghostty-vt ABI (generated)
+// ============================================================================
+// Enum values come from upstream's frozen ABI manifest via
+// scripts/gen-ghostty-abi.ts -> lib/ghostty-abi.ts; nothing below is mirrored
+// by hand. These are ntwebterm's historical names for the upstream enums; the
+// Ghostty* originals and the struct layouts are importable from './ghostty-abi'.
+import {
+  GhosttyCellData as CellData,
+  GhosttyCellWide as CellWide,
+  GhosttyCursorStyle as CursorVisualStyle,
+  GhosttyRenderStateDirty as DirtyState,
+  GhosttyKey as Key,
+  GhosttyKeyAction as KeyAction,
+  GhosttyKeyEncoderOption as KeyEncoderOption,
+  GhosttyKittyGraphicsData as KittyGraphicsData,
+  GhosttyKittyGraphicsImageData as KittyGraphicsImageData,
+  GhosttyImageLayer as KittyGraphicsImageLayer,
+  GhosttyKittyGraphicsPlacementData as KittyGraphicsPlacementData,
+  GhosttyKittyGraphicsPlacementIteratorOption as KittyGraphicsPlacementIteratorOption,
+  GhosttyKittyImageCompression as KittyImageCompression,
+  GhosttyKittyImageFormat as KittyImageFormat,
+  GhosttyPointTag as PointTag,
+  GhosttyRenderStateData as RenderStateData,
+  GhosttyRenderStateOption as RenderStateOption,
+  GhosttyRenderStateRowData as RenderStateRowData,
+  GhosttyRenderStateRowOption as RenderStateRowOption,
+  GhosttyRenderStateRowCellsData as RowCellsData,
+  GhosttyRowData as RowData,
+  GhosttyStyleFlagsBit as StyleFlag,
+  GhosttySysOption as SysOption,
+  GhosttyTerminalData as TerminalData,
+  GhosttyTerminalOption as TerminalOption,
+  GhosttyTerminalScreen as TerminalScreen,
+} from './ghostty-abi';
+
+export {
+  CellData,
+  CellWide,
+  CursorVisualStyle,
+  DirtyState,
+  Key,
+  KeyAction,
+  KeyEncoderOption,
+  KittyGraphicsData,
+  KittyGraphicsImageData,
+  KittyGraphicsImageLayer,
+  KittyGraphicsPlacementData,
+  KittyGraphicsPlacementIteratorOption,
+  KittyImageCompression,
+  KittyImageFormat,
+  PointTag,
+  RenderStateData,
+  RenderStateOption,
+  RenderStateRowData,
+  RenderStateRowOption,
+  RowCellsData,
+  RowData,
+  StyleFlag,
+  SysOption,
+  TerminalData,
+  TerminalOption,
+  TerminalScreen,
+};
 
 // ============================================================================
 // Key Encoder Types
@@ -63,232 +84,6 @@ export enum KittyKeyFlags {
   REPORT_ALL = 1 << 3, // Report all events
   REPORT_ASSOCIATED = 1 << 4, // Report associated text
   ALL = 0x1f, // All flags enabled
-}
-
-/**
- * Key encoder options
- */
-export enum KeyEncoderOption {
-  CURSOR_KEY_APPLICATION = 1, // DEC mode 1
-  KEYPAD_KEY_APPLICATION = 2, // DEC mode 66
-  IGNORE_KEYPAD_WITH_NUMLOCK = 3, // DEC mode 1035
-  ALT_ESC_PREFIX = 4, // DEC mode 1036
-  MODIFY_OTHER_KEYS_STATE_2 = 5, // xterm modifyOtherKeys
-  KITTY_KEYBOARD_FLAGS = 6, // Kitty protocol flags (C: GHOSTTY_KEY_ENCODER_OPT_KITTY_FLAGS)
-  /** Mirrors GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT. */
-  MACOS_OPTION_AS_ALT = 7,
-  /** Mirrors GHOSTTY_KEY_ENCODER_OPT_BACKARROW_KEY_MODE. */
-  BACKARROW_KEY_MODE = 8,
-}
-
-/**
- * Key action
- */
-export enum KeyAction {
-  RELEASE = 0,
-  PRESS = 1,
-  REPEAT = 2,
-}
-
-/**
- * Physical key codes matching Ghostty's internal Key enum.
- * These values are used by Ghostty's key encoder to produce correct escape sequences.
- * Reference: ghostty/src/input/key.zig
- */
-export enum Key {
-  // Unidentified key
-  UNIDENTIFIED = 0,
-
-  // Writing System Keys
-  GRAVE = 1, // ` and ~
-  BACKSLASH = 2, // \ and |
-  BRACKET_LEFT = 3, // [ and {
-  BRACKET_RIGHT = 4, // ] and }
-  COMMA = 5, // , and <
-  ZERO = 6,
-  ONE = 7,
-  TWO = 8,
-  THREE = 9,
-  FOUR = 10,
-  FIVE = 11,
-  SIX = 12,
-  SEVEN = 13,
-  EIGHT = 14,
-  NINE = 15,
-  EQUAL = 16, // = and +
-  INTL_BACKSLASH = 17,
-  INTL_RO = 18,
-  INTL_YEN = 19,
-  A = 20,
-  B = 21,
-  C = 22,
-  D = 23,
-  E = 24,
-  F = 25,
-  G = 26,
-  H = 27,
-  I = 28,
-  J = 29,
-  K = 30,
-  L = 31,
-  M = 32,
-  N = 33,
-  O = 34,
-  P = 35,
-  Q = 36,
-  R = 37,
-  S = 38,
-  T = 39,
-  U = 40,
-  V = 41,
-  W = 42,
-  X = 43,
-  Y = 44,
-  Z = 45,
-  MINUS = 46, // - and _
-  PERIOD = 47, // . and >
-  QUOTE = 48, // ' and "
-  SEMICOLON = 49, // ; and :
-  SLASH = 50, // / and ?
-
-  // Functional Keys
-  ALT_LEFT = 51,
-  ALT_RIGHT = 52,
-  BACKSPACE = 53,
-  CAPS_LOCK = 54,
-  CONTEXT_MENU = 55,
-  CONTROL_LEFT = 56,
-  CONTROL_RIGHT = 57,
-  ENTER = 58,
-  META_LEFT = 59,
-  META_RIGHT = 60,
-  SHIFT_LEFT = 61,
-  SHIFT_RIGHT = 62,
-  SPACE = 63,
-  TAB = 64,
-  CONVERT = 65,
-  KANA_MODE = 66,
-  NON_CONVERT = 67,
-
-  // Control Pad Section
-  DELETE = 68,
-  END = 69,
-  HELP = 70,
-  HOME = 71,
-  INSERT = 72,
-  PAGE_DOWN = 73,
-  PAGE_UP = 74,
-
-  // Arrow Pad Section
-  DOWN = 75,
-  LEFT = 76,
-  RIGHT = 77,
-  UP = 78,
-
-  // Numpad Section
-  NUM_LOCK = 79,
-  KP_0 = 80,
-  KP_1 = 81,
-  KP_2 = 82,
-  KP_3 = 83,
-  KP_4 = 84,
-  KP_5 = 85,
-  KP_6 = 86,
-  KP_7 = 87,
-  KP_8 = 88,
-  KP_9 = 89,
-  KP_PLUS = 90, // Keypad +
-  KP_BACKSPACE = 91,
-  KP_CLEAR = 92,
-  KP_CLEAR_ENTRY = 93,
-  KP_COMMA = 94,
-  KP_PERIOD = 95, // Keypad .
-  KP_DIVIDE = 96, // Keypad /
-  KP_ENTER = 97, // Keypad Enter
-  KP_EQUAL = 98,
-  KP_MEMORY_ADD = 99,
-  KP_MEMORY_CLEAR = 100,
-  KP_MEMORY_RECALL = 101,
-  KP_MEMORY_STORE = 102,
-  KP_MEMORY_SUBTRACT = 103,
-  KP_MULTIPLY = 104, // Keypad *
-  KP_PAREN_LEFT = 105,
-  KP_PAREN_RIGHT = 106,
-  KP_MINUS = 107, // Keypad -
-  KP_SEPARATOR = 108,
-  NUMPAD_UP = 109,
-  NUMPAD_DOWN = 110,
-  NUMPAD_RIGHT = 111,
-  NUMPAD_LEFT = 112,
-  NUMPAD_BEGIN = 113,
-  NUMPAD_HOME = 114,
-  NUMPAD_END = 115,
-  NUMPAD_INSERT = 116,
-  NUMPAD_DELETE = 117,
-  NUMPAD_PAGE_UP = 118,
-  NUMPAD_PAGE_DOWN = 119,
-
-  // Function Keys
-  ESCAPE = 120,
-  F1 = 121,
-  F2 = 122,
-  F3 = 123,
-  F4 = 124,
-  F5 = 125,
-  F6 = 126,
-  F7 = 127,
-  F8 = 128,
-  F9 = 129,
-  F10 = 130,
-  F11 = 131,
-  F12 = 132,
-  F13 = 133,
-  F14 = 134,
-  F15 = 135,
-  F16 = 136,
-  F17 = 137,
-  F18 = 138,
-  F19 = 139,
-  F20 = 140,
-  F21 = 141,
-  F22 = 142,
-  F23 = 143,
-  F24 = 144,
-  F25 = 145,
-  FN = 146,
-  FN_LOCK = 147,
-  PRINT_SCREEN = 148,
-  SCROLL_LOCK = 149,
-  PAUSE = 150,
-
-  // Media Keys
-  BROWSER_BACK = 151,
-  BROWSER_FAVORITES = 152,
-  BROWSER_FORWARD = 153,
-  BROWSER_HOME = 154,
-  BROWSER_REFRESH = 155,
-  BROWSER_SEARCH = 156,
-  BROWSER_STOP = 157,
-  EJECT = 158,
-  LAUNCH_APP_1 = 159,
-  LAUNCH_APP_2 = 160,
-  LAUNCH_MAIL = 161,
-  MEDIA_PLAY_PAUSE = 162,
-  MEDIA_SELECT = 163,
-  MEDIA_STOP = 164,
-  MEDIA_TRACK_NEXT = 165,
-  MEDIA_TRACK_PREVIOUS = 166,
-  POWER = 167,
-  SLEEP = 168,
-  AUDIO_VOLUME_DOWN = 169,
-  AUDIO_VOLUME_MUTE = 170,
-  AUDIO_VOLUME_UP = 171,
-  WAKE_UP = 172,
-
-  // Clipboard Keys
-  COPY = 173,
-  CUT = 174,
-  PASTE = 175,
 }
 
 /**
@@ -574,194 +369,6 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
 // ============================================================================
 
 /**
- * Dirty state from RenderState. Mirrors GhosttyRenderStateDirty.
- */
-export enum DirtyState {
-  NONE = 0,
-  PARTIAL = 1,
-  FULL = 2,
-}
-
-/**
- * Keys for ghostty_render_state_get(). Mirrors GhosttyRenderStateData.
- */
-export enum RenderStateData {
-  COLS = 1,
-  ROWS = 2,
-  DIRTY = 3,
-  ROW_ITERATOR = 4,
-  COLOR_BACKGROUND = 5,
-  COLOR_FOREGROUND = 6,
-  COLOR_CURSOR = 7,
-  COLOR_CURSOR_HAS_VALUE = 8,
-  COLOR_PALETTE = 9,
-  CURSOR_VISUAL_STYLE = 10,
-  CURSOR_VISIBLE = 11,
-  CURSOR_BLINKING = 12,
-  CURSOR_PASSWORD_INPUT = 13,
-  CURSOR_VIEWPORT_HAS_VALUE = 14,
-  CURSOR_VIEWPORT_X = 15,
-  CURSOR_VIEWPORT_Y = 16,
-  CURSOR_VIEWPORT_WIDE_TAIL = 17,
-  IMAGE_ITERATOR = 22,
-  IMAGE_PLACEMENTS_GENERATION = 23,
-}
-
-/**
- * Options for ghostty_render_state_set(). Mirrors GhosttyRenderStateOption.
- */
-export enum RenderStateOption {
-  DIRTY = 1,
-}
-
-/**
- * Visual cursor style. Mirrors GhosttyCursorStyle.
- */
-export enum CursorVisualStyle {
-  BAR = 0,
-  BLOCK = 1,
-  UNDERLINE = 2,
-  BLOCK_HOLLOW = 3,
-}
-
-/**
- * Keys for ghostty_terminal_get(). Mirrors GhosttyTerminalData.
- * Only entries actually used by the TS layer are listed here; the upstream
- * enum has more (TITLE, PWD, SCROLLBAR, KITTY_KEYBOARD_FLAGS, palettes, ...).
- */
-export enum TerminalData {
-  COLS = 1,
-  ROWS = 2,
-  CURSOR_X = 3,
-  CURSOR_Y = 4,
-  CURSOR_PENDING_WRAP = 5,
-  ACTIVE_SCREEN = 6,
-  CURSOR_VISIBLE = 7,
-  KITTY_KEYBOARD_FLAGS = 8,
-  SCROLLBAR = 9,
-  CURSOR_SGR_STYLE = 10,
-  MOUSE_TRACKING = 11,
-  TITLE = 12,
-  PWD = 13,
-  TOTAL_ROWS = 14,
-  SCROLLBACK_ROWS = 15,
-  WIDTH_PX = 16,
-  HEIGHT_PX = 17,
-  COLOR_FOREGROUND = 18,
-  COLOR_BACKGROUND = 19,
-  COLOR_CURSOR = 20,
-  COLOR_PALETTE = 21,
-  COLOR_FOREGROUND_DEFAULT = 22,
-  COLOR_BACKGROUND_DEFAULT = 23,
-  COLOR_CURSOR_DEFAULT = 24,
-  COLOR_PALETTE_DEFAULT = 25,
-  KITTY_IMAGE_STORAGE_LIMIT = 26,
-  KITTY_GRAPHICS = 30,
-  SCROLLBACK_MAX_BYTES = 34,
-  SCROLLBACK_MAX_LINES = 35,
-  MODE = 37,
-}
-
-/**
- * Options for ghostty_terminal_set(). Mirrors GhosttyTerminalOption.
- * Only the entries the TS layer touches are listed; the upstream enum has
- * more (callbacks for BELL/TITLE_CHANGED/etc., kitty-image limits, ...).
- */
-export enum TerminalOption {
-  USERDATA = 1,
-  WRITE_PTY = 2,
-  BELL = 3,
-  ENQUIRY = 4,
-  XTVERSION = 5,
-  TITLE_CHANGED = 6,
-  SIZE = 7,
-  COLOR_SCHEME = 8,
-  COLOR_FOREGROUND = 12,
-  COLOR_BACKGROUND = 13,
-  COLOR_CURSOR = 14,
-  COLOR_PALETTE = 15,
-  KITTY_IMAGE_STORAGE_LIMIT = 16,
-  KITTY_IMAGE_MEDIUM_SHARED_MEM = 19,
-  PWD_CHANGED = 26,
-  CLIPBOARD_WRITE = 27,
-  SCROLLBACK_MAX_BYTES = 28,
-  SCROLLBACK_MAX_LINES = 29,
-  DESKTOP_NOTIFICATION = 30,
-  PROGRESS_REPORT = 31,
-  MODE_DEFAULT = 34,
-  MODE = 35,
-  CLIPBOARD_READ = 39,
-  RENDER_HOLD = 42,
-  SEMANTIC_PROMPT = 43,
-  RESET = 44,
-  PROGRAM_STATUS = 47,
-  RESIZE_WINDOW = 48,
-}
-
-/**
- * Options for ghostty_sys_set(). Mirrors GhosttySysOption.
- * Process-global / per-WASM-instance settings.
- */
-export enum SysOption {
-  USERDATA = 1,
-  DECODE_PNG = 2,
-  LOG = 3,
-  RANDOM_SECURE = 4,
-  READ_SHARED_MEMORY = 5,
-}
-
-/**
- * Keys for ghostty_kitty_graphics_get(). Mirrors GhosttyKittyGraphicsData.
- */
-export enum KittyGraphicsData {
-  GENERATION = 2,
-  PLACEMENT_ITERATOR = 1,
-}
-
-/**
- * Keys for ghostty_kitty_graphics_placement_get(). Mirrors
- * GhosttyKittyGraphicsPlacementData. All values are u32 except Z (i32).
- */
-export enum KittyGraphicsPlacementData {
-  IMAGE_ID = 1,
-  PLACEMENT_ID = 2,
-  IS_VIRTUAL = 3,
-  X_OFFSET = 4,
-  Y_OFFSET = 5,
-  SOURCE_X = 6,
-  SOURCE_Y = 7,
-  SOURCE_WIDTH = 8,
-  SOURCE_HEIGHT = 9,
-  COLUMNS = 10,
-  ROWS = 11,
-  Z = 12,
-}
-
-/**
- * Keys for ghostty_kitty_graphics_image_get(). Mirrors GhosttyKittyGraphicsImageData.
- */
-export enum KittyGraphicsImageData {
-  GENERATION = 9,
-  ID = 1,
-  NUMBER = 2,
-  WIDTH = 3,
-  HEIGHT = 4,
-  FORMAT = 5,
-  COMPRESSION = 6,
-  PIXELS = 7,
-  EXPECTED_LEN = 8,
-}
-
-/**
- * Z-layer of a Kitty placement. Mirrors GhosttyImageLayer.
- */
-export enum KittyGraphicsImageLayer {
-  BELOW_BACKGROUND = 0,
-  BELOW_TEXT = 1,
-  ABOVE_TEXT = 2,
-}
-
-/**
  * Layer filter mask for KittyGraphicsPlacementIteratorOption.LAYER. Mirrors
  * the GHOSTTY_IMAGE_LAYER_MASK_* macros: one bit per KittyGraphicsImageLayer
  * value. A mask of 0 (ALL) turns the filter off.
@@ -774,39 +381,6 @@ export enum KittyGraphicsPlacementLayer {
   BELOW_TEXT = 1 << 1,
   /** 1 << KittyGraphicsImageLayer.ABOVE_TEXT */
   ABOVE_TEXT = 1 << 2,
-}
-
-/**
- * Settable options on the placement iterator. Mirrors
- * GhosttyKittyGraphicsPlacementIteratorOption.
- */
-export enum KittyGraphicsPlacementIteratorOption {
-  LAYER = 1,
-}
-
-/**
- * Pixel format of a Kitty graphics image. Mirrors GhosttyKittyImageFormat.
- *   RGB:        24-bit, 3 bytes/px
- *   RGBA:       32-bit, 4 bytes/px (the canvas-friendly path)
- *   PNG:        compressed; needs a JS-side decoder hooked up via
- *               ghostty_sys_set(DECODE_PNG, fn)
- *   GRAY_ALPHA: 16-bit, 2 bytes/px
- *   GRAY:       8-bit, 1 byte/px
- */
-export enum KittyImageFormat {
-  RGB = 0,
-  RGBA = 1,
-  PNG = 2,
-  GRAY_ALPHA = 3,
-  GRAY = 4,
-}
-
-/**
- * Compression of a Kitty graphics image. Mirrors GhosttyKittyImageCompression.
- */
-export enum KittyImageCompression {
-  NONE = 0,
-  ZLIB_DEFLATE = 1,
 }
 
 /**
@@ -854,9 +428,6 @@ export interface KittyPlacementInfo {
   isVirtual: boolean;
 }
 
-/** Size in bytes of GhosttyKittyGraphicsPlacementRenderInfo on wasm32. */
-export const KITTY_PLACEMENT_RENDER_INFO_SIZE = 48;
-
 /**
  * Image bytes + metadata returned by GhosttyTerminal.getKittyImageRgba.
  * `data` is a *view* into WASM memory and is invalidated by the next
@@ -870,100 +441,6 @@ export interface KittyImagePixels {
   format: KittyImageFormat;
   /** Borrowed view into WASM memory; copy before vt_write to retain. */
   data: Uint8Array;
-}
-
-/**
- * Active screen identifier. Mirrors GhosttyTerminalScreen.
- * Returned as the value for TerminalData.ACTIVE_SCREEN.
- */
-export enum TerminalScreen {
-  PRIMARY = 0,
-  ALTERNATE = 1,
-}
-
-/**
- * Keys for ghostty_render_state_row_get(). Mirrors GhosttyRenderStateRowData.
- */
-export enum RenderStateRowData {
-  DIRTY = 1,
-  RAW = 2,
-  CELLS = 3,
-}
-
-/**
- * Options for ghostty_render_state_row_set(). Mirrors GhosttyRenderStateRowOption.
- */
-export enum RenderStateRowOption {
-  DIRTY = 1,
-}
-
-/**
- * Keys for ghostty_render_state_row_cells_get(). Mirrors
- * GhosttyRenderStateRowCellsData.
- */
-export enum RowCellsData {
-  RAW = 1,
-  STYLE = 2,
-  GRAPHEMES_LEN = 3,
-  GRAPHEMES_BUF = 4,
-  BG_COLOR = 5,
-  FG_COLOR = 6,
-}
-
-/**
- * Keys for ghostty_row_get(). Mirrors GhosttyRowData. Used with the raw
- * GhosttyRow value obtained via _render_state_row_get(iter, RAW, &row).
- */
-export enum RowData {
-  WRAP = 1,
-  WRAP_CONTINUATION = 2,
-  GRAPHEME = 3,
-  STYLED = 4,
-  HYPERLINK = 5,
-}
-
-/**
- * Tag values for GhosttyPoint. Mirrors GhosttyPointTag. The tag selects
- * which coordinate space y is interpreted in.
- */
-export enum PointTag {
-  ACTIVE = 0,
-  VIEWPORT = 1,
-  SCREEN = 2,
-  HISTORY = 3,
-}
-
-/**
- * Keys for ghostty_cell_get(). Mirrors GhosttyCellData. Used with the
- * raw GhosttyCell value obtained via grid_ref_cell or row_cells_get(RAW).
- */
-export enum CellData {
-  CODEPOINT = 1,
-  CONTENT_TAG = 2,
-  WIDE = 3,
-  HAS_TEXT = 4,
-  HAS_STYLING = 5,
-  STYLE_ID = 6,
-  HAS_HYPERLINK = 7,
-  PROTECTED = 8,
-  SEMANTIC_CONTENT = 9,
-  COLOR_PALETTE = 10,
-  COLOR_RGB = 11,
-}
-
-/**
- * Cell width classification. Mirrors GhosttyCellWide.
- *   NARROW: single-column cell (most ASCII, BMP)
- *   WIDE: leading half of a double-width cell (CJK, most emoji)
- *   SPACER_TAIL: trailing half of a wide cell — placeholder, no glyph
- *   SPACER_HEAD: leading placeholder when a wide cell would have crossed
- *     the right margin and got pushed to the next row
- */
-export enum CellWide {
-  NARROW = 0,
-  WIDE = 1,
-  SPACER_TAIL = 2,
-  SPACER_HEAD = 3,
 }
 
 /**
@@ -999,16 +476,6 @@ export interface RenderStateColors {
 }
 
 /**
- * Size of cursor struct in WASM (8 bytes)
- */
-export const CURSOR_STRUCT_SIZE = 8;
-
-/**
- * Size of colors struct in WASM (12 bytes)
- */
-export const COLORS_STRUCT_SIZE = 12;
-
-/**
  * Terminal configuration applied by the TypeScript bridge
  * All color values use 0xRRGGBB format. A value of 0 means "use default".
  */
@@ -1019,13 +486,6 @@ export interface GhosttyTerminalConfig {
   cursorColor?: number;
   palette?: (number | undefined)[];
 }
-
-/**
- * Size of GhosttyTerminalConfig struct in WASM memory (bytes).
- * Layout: scrollback_limit(u32) + fg_color(u32) + bg_color(u32) + cursor_color(u32) + palette[16](u32*16)
- * Total: 4 + 4 + 4 + 4 + 64 = 80 bytes
- */
-export const GHOSTTY_CONFIG_SIZE = 80;
 
 /**
  * Opaque terminal pointer (WASM memory address)

@@ -1,0 +1,21 @@
+{
+  "GhosttySysOption": {
+    "values": { "READ_SHARED_MEMORY": 5 },
+    "keys": {
+      "READ_SHARED_MEMORY": { "direction": "in", "type": "GhosttySysReadSharedMemoryFn" }
+    }
+  },
+  "GhosttySysReadSharedMemoryFn": {
+    "kind": "callback",
+    "size": 4,
+    "align": 4,
+    "params": [
+      { "type": "pointer", "elem": "opaque", "const": false, "nullable": true },
+      { "type": "pointer", "elem": "GhosttyAllocator", "const": true },
+      { "type": "pointer", "elem": "u8", "const": true },
+      { "type": "u32" },
+      { "type": "pointer", "elem": "GhosttySysImage", "const": false }
+    ],
+    "return": { "type": "bool" }
+  }
+}

@@ -246,7 +246,7 @@ updates. Compared with the v1.4.0 pin, this release changed the ABI as follows:
 | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Every option/data enum gains an `_INVALID = 0` sentinel, shifting most values by one                                               | `TerminalOption`, `SysOption`, `KeyEncoderOption`, `RenderStateOption`, `RenderStateRowOption` and the Kitty iterator option were renumbered in `types.ts`. |
 | `ghostty_key_encoder_setopt*` renamed to `ghostty_key_encoder_set*`; `ghostty_key_event_set_utf8` takes a `GhosttyString` by value | Bindings renamed; the UTF-8 text is passed as an 8-byte `{ ptr, len }` struct.                                                                              |
-| `GhosttyKey` adds `FN` (146) and renames keys (`DIGIT_*`, `ARROW_*`, `NUMPAD_*`, `BACKQUOTE`)                                      | `Key` values from `FN_LOCK` onward shifted by one; the TypeScript names are unchanged.                                                                      |
+| `GhosttyKey` adds `FN` (146) and renames keys (`DIGIT_*`, `ARROW_*`, `NUMPAD_*`, `BACKQUOTE`)                                      | `Key` values from `FN_LOCK` onward shifted by one; `Key` now uses the upstream names and keeps the old ones (`KP_*`, `GRAVE`, ...) as deprecated aliases.   |
 | Callback payload structs drop their `size` prefix (`GhosttyTerminalProgramStatus`, `GhosttyGridRef`, `GhosttySelection`, ...)      | OSC 7501 program status and grid-reference decoding use the new offsets.                                                                                    |
 | `GhosttyStyle` is a frozen 16-byte struct: 4-byte `GhosttyStyleColor` values and a `GhosttyStyleFlags` bitfield                    | Cell style decoding reads the flags word and 1-byte color tags instead of the old 72-byte struct.                                                           |
 | `GRAPHEMES_BUF` takes a `GhosttyCodepointBuffer { ptr, cap, len }`                                                                 | Viewport grapheme reads pass a descriptor; the old bare-pointer call silently returned nothing.                                                             |
@@ -258,6 +258,21 @@ updates. Compared with the v1.4.0 pin, this release changed the ABI as follows:
 The browser shared-memory hook in `patches/ghostty-wasm-api.patch` now also
 registers `GhosttySysReadSharedMemoryFn` in upstream's type manifest, which the
 1.0 build requires for every option that takes a callback.
+
+#### Generated ABI bindings
+
+Nothing about the C ABI is mirrored by hand any more. `scripts/gen-ghostty-abi.ts`
+reads upstream's frozen manifest (`ghostty/src/terminal/c/abi/wasm32-freestanding.json`)
+plus the patch's additions (`patches/ghostty-wasm-api.abi.json`) and writes
+`lib/ghostty-abi.ts`: every `Ghostty*` enum, the bit fields of packed types such
+as `GhosttyStyleFlags`, and a `*Layout` constant with the size and field offsets
+of every struct. `lib/types.ts` re-exports the enums under ntwebterm's names and
+`lib/ghostty.ts` decodes callback payloads through the layouts.
+`lib/ghostty-abi.test.ts` fails when the generated file is stale, when the built
+WASM's own `ghostty_type_json()` disagrees with manifest + extensions, or when a
+declared export is missing from upstream's `symbols.txt` or the binary. To sync
+to a new upstream tag: bump the submodule, `bun run build:wasm`, `bun run gen:abi`,
+then `bun test`.
 
 See the [upstream comparison](https://github.com/ghostty-org/ghostty/compare/v1.4.0...vt-1.0.0)
 and the [vt-1.0.0 C API headers](https://github.com/ghostty-org/ghostty/tree/vt-1.0.0/include/ghostty/vt)

@@ -10,8 +10,38 @@ import { RenderImages } from './render-images';
 
 import { decode as decodePng } from 'fast-png';
 import {
-  CODEPOINT_BUFFER_CAP_OFFSET,
-  CODEPOINT_BUFFER_SIZE,
+  GhosttyClipboardContentLayout,
+  GhosttyClipboardReadLayout,
+  GhosttyClipboardReadReplyLayout,
+  GhosttyClipboardReadResult,
+  GhosttyClipboardWriteLayout,
+  GhosttyClipboardWriteReplyLayout,
+  GhosttyClipboardWriteResult,
+  GhosttyCodepointBufferLayout,
+  GhosttyColorRgbLayout,
+  GhosttyColorScheme,
+  GhosttyGridRefLayout,
+  GhosttyKittyGraphicsPlacementRenderInfoLayout,
+  GhosttyPointCoordinateLayout,
+  GhosttyPointLayout,
+  GhosttyPointValueLayout,
+  GhosttySizeReportSizeLayout,
+  GhosttyStringLayout,
+  GhosttyStyleColorLayout,
+  GhosttyStyleColorTag,
+  GhosttyStyleLayout,
+  GhosttySysImageLayout,
+  GhosttyTerminalDesktopNotificationLayout,
+  GhosttyTerminalModeConfigLayout,
+  GhosttyTerminalProgramStatusLayout,
+  GhosttyTerminalProgressReportLayout,
+  GhosttyTerminalResizeWindowGridLayout,
+  GhosttyTerminalResizeWindowLayout,
+  GhosttyTerminalResizeWindowTag,
+  GhosttyTerminalResizeWindowValueLayout,
+  GhosttyTerminalSemanticPromptLayout,
+} from './ghostty-abi';
+import {
   CellData,
   CellFlags,
   CellWide,
@@ -24,16 +54,9 @@ import {
   CursorVisualStyle,
   type DesktopNotification,
   DirtyState,
-  GHOSTTY_STYLE_BG_COLOR_OFFSET,
-  GHOSTTY_STYLE_FG_COLOR_OFFSET,
-  GHOSTTY_STYLE_FLAGS_OFFSET,
-  GHOSTTY_STYLE_SIZE,
-  GRID_REF_SIZE,
-  GRID_REF_X_OFFSET,
   type GhosttyCell,
   type GhosttyTerminalConfig,
   type GhosttyWasmExports,
-  KITTY_PLACEMENT_RENDER_INFO_SIZE,
   KeyEncoderOption,
   type KeyEvent,
   KittyGraphicsData,
@@ -236,7 +259,7 @@ export class KeyEncoder {
   }
 
   setKittyFlags(flags: KittyKeyFlags): void {
-    this.setOption(KeyEncoderOption.KITTY_KEYBOARD_FLAGS, flags);
+    this.setOption(KeyEncoderOption.KITTY_FLAGS, flags);
   }
 
   setOptionsFromTerminal(terminalHandle: TerminalHandle): void {
@@ -267,16 +290,15 @@ export class KeyEncoder {
         utf8Len = utf8Bytes.length;
         utf8Ptr = this.exports.ghostty_wasm_alloc(utf8Len);
         new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
-        // GhosttyString is passed by value; on wasm32 that is a pointer to
-        // an 8-byte { ptr: u32, len: u32 } copy.
-        const strPtr = this.exports.ghostty_wasm_alloc(8);
+        // GhosttyString is passed by value; on wasm32 that is a pointer to a copy.
+        const strPtr = this.exports.ghostty_wasm_alloc(GhosttyStringLayout.size);
         try {
           const sv = new DataView(this.exports.memory.buffer);
-          sv.setUint32(strPtr, utf8Ptr, true);
-          sv.setUint32(strPtr + 4, utf8Len, true);
+          sv.setUint32(strPtr + GhosttyStringLayout.offset.ptr, utf8Ptr, true);
+          sv.setUint32(strPtr + GhosttyStringLayout.offset.len, utf8Len, true);
           this.exports.ghostty_key_event_set_utf8(eventPtr, strPtr);
         } finally {
-          this.exports.ghostty_wasm_free(strPtr, 8);
+          this.exports.ghostty_wasm_free(strPtr, GhosttyStringLayout.size);
         }
         const cp = event.utf8.codePointAt(0);
         if (cp !== undefined) {
@@ -555,18 +577,17 @@ export class GhosttyTerminal {
 
   /** Read a GhosttyString-valued terminal_get key, copying it out of WASM memory. */
   private getStringData(key: TerminalData): string {
-    // GhosttyString is { ptr: u32, len: u32 } (8 bytes on wasm32)
-    const strPtr = this.exports.ghostty_wasm_alloc(8);
+    const strPtr = this.exports.ghostty_wasm_alloc(GhosttyStringLayout.size);
     try {
       const r = this.exports.ghostty_terminal_get(this.handle, key, strPtr);
       if (r !== 0) return '';
       const view = new DataView(this.memory.buffer);
-      const ptr = view.getUint32(strPtr, true);
-      const len = view.getUint32(strPtr + 4, true);
+      const ptr = view.getUint32(strPtr + GhosttyStringLayout.offset.ptr, true);
+      const len = view.getUint32(strPtr + GhosttyStringLayout.offset.len, true);
       if (ptr === 0 || len === 0) return '';
       return new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len).slice());
     } finally {
-      this.exports.ghostty_wasm_free(strPtr, 8);
+      this.exports.ghostty_wasm_free(strPtr, GhosttyStringLayout.size);
     }
   }
 
@@ -579,7 +600,7 @@ export class GhosttyTerminal {
         this.rowDirtyCache = null;
         this.rowWrapCache = null;
         const dirty = this.rsGetU32(RenderStateData.DIRTY) as DirtyState;
-        if (dirty !== DirtyState.NONE) {
+        if (dirty !== DirtyState.FALSE) {
           this.hasCapturedHoldFrame = true;
         }
       }
@@ -745,11 +766,12 @@ export class GhosttyTerminal {
       // it here from JS to preserve coder's defaults. MODE_DEFAULT sets both
       // the current value and the value restored by RIS, so a program that
       // sends ESC c doesn't turn clustering off for the rest of the session.
-      const modePtr = this.exports.ghostty_wasm_alloc(4);
+      const modePtr = this.exports.ghostty_wasm_alloc(GhosttyTerminalModeConfigLayout.size);
       try {
         const view = new DataView(this.memory.buffer);
-        view.setUint16(modePtr, packMode(2027, false), true);
-        view.setUint8(modePtr + 2, 1);
+        const o = GhosttyTerminalModeConfigLayout.offset;
+        view.setUint16(modePtr + o.mode, packMode(2027, false), true);
+        view.setUint8(modePtr + o.value, 1);
         const modeResult = this.exports.ghostty_terminal_set(
           this.handle,
           TerminalOption.MODE_DEFAULT,
@@ -757,7 +779,7 @@ export class GhosttyTerminal {
         );
         if (modeResult !== 0) throw new Error(`Enabling mode 2027 failed: ${modeResult}`);
       } finally {
-        this.exports.ghostty_wasm_free(modePtr, 4);
+        this.exports.ghostty_wasm_free(modePtr, GhosttyTerminalModeConfigLayout.size);
       }
 
       // Enable kitty graphics by giving the terminal a non-zero image
@@ -1191,10 +1213,16 @@ export class GhosttyTerminal {
       }
 
       const idPtr = this.exports.ghostty_wasm_alloc(4);
-      const infoPtr = this.exports.ghostty_wasm_alloc(KITTY_PLACEMENT_RENDER_INFO_SIZE);
+      const infoPtr = this.exports.ghostty_wasm_alloc(
+        GhosttyKittyGraphicsPlacementRenderInfoLayout.size
+      );
       // Sized struct: write the discriminator once, the populator
       // overwrites the rest each call.
-      new DataView(this.memory.buffer).setUint32(infoPtr, KITTY_PLACEMENT_RENDER_INFO_SIZE, true);
+      new DataView(this.memory.buffer).setUint32(
+        infoPtr,
+        GhosttyKittyGraphicsPlacementRenderInfoLayout.size,
+        true
+      );
       try {
         while (this.exports.ghostty_kitty_graphics_placement_next(iter)) {
           // Look up image_id for this placement so we can pair it with
@@ -1215,7 +1243,7 @@ export class GhosttyTerminal {
           // explicit so the call always sees the buffer as fully owned).
           new DataView(this.memory.buffer).setUint32(
             infoPtr,
-            KITTY_PLACEMENT_RENDER_INFO_SIZE,
+            GhosttyKittyGraphicsPlacementRenderInfoLayout.size,
             true
           );
           const r2 = this.exports.ghostty_kitty_graphics_placement_render_info(
@@ -1237,19 +1265,20 @@ export class GhosttyTerminal {
           const isVirtual = new DataView(this.memory.buffer).getUint8(idPtr) !== 0;
 
           const v = new DataView(this.memory.buffer);
+          const o = GhosttyKittyGraphicsPlacementRenderInfoLayout.offset;
           const info: KittyPlacementInfo = {
             imageId,
-            pixelWidth: v.getUint32(infoPtr + 4, true),
-            pixelHeight: v.getUint32(infoPtr + 8, true),
-            gridCols: v.getUint32(infoPtr + 12, true),
-            gridRows: v.getUint32(infoPtr + 16, true),
-            viewportCol: v.getInt32(infoPtr + 20, true),
-            viewportRow: v.getInt32(infoPtr + 24, true),
-            viewportVisible: v.getUint8(infoPtr + 28) !== 0,
-            sourceX: v.getUint32(infoPtr + 32, true),
-            sourceY: v.getUint32(infoPtr + 36, true),
-            sourceWidth: v.getUint32(infoPtr + 40, true),
-            sourceHeight: v.getUint32(infoPtr + 44, true),
+            pixelWidth: v.getUint32(infoPtr + o.pixel_width, true),
+            pixelHeight: v.getUint32(infoPtr + o.pixel_height, true),
+            gridCols: v.getUint32(infoPtr + o.grid_cols, true),
+            gridRows: v.getUint32(infoPtr + o.grid_rows, true),
+            viewportCol: v.getInt32(infoPtr + o.viewport_col, true),
+            viewportRow: v.getInt32(infoPtr + o.viewport_row, true),
+            viewportVisible: v.getUint8(infoPtr + o.viewport_visible) !== 0,
+            sourceX: v.getUint32(infoPtr + o.source_x, true),
+            sourceY: v.getUint32(infoPtr + o.source_y, true),
+            sourceWidth: v.getUint32(infoPtr + o.source_width, true),
+            sourceHeight: v.getUint32(infoPtr + o.source_height, true),
             isVirtual,
           };
           // onlyVisible filter: keep only visible direct placements. Virtual
@@ -1261,7 +1290,7 @@ export class GhosttyTerminal {
         }
       } finally {
         this.exports.ghostty_wasm_free(idPtr, 4);
-        this.exports.ghostty_wasm_free(infoPtr, KITTY_PLACEMENT_RENDER_INFO_SIZE);
+        this.exports.ghostty_wasm_free(infoPtr, GhosttyKittyGraphicsPlacementRenderInfoLayout.size);
       }
     } finally {
       if (iter !== 0) {
@@ -1309,8 +1338,8 @@ export class GhosttyTerminal {
         ) === 0
       ) {
         const sv = new DataView(this.memory.buffer);
-        dataPtr = sv.getUint32(u32Ptr, true);
-        dataLen = sv.getUint32(u32Ptr + 4, true);
+        dataPtr = sv.getUint32(u32Ptr + GhosttyStringLayout.offset.ptr, true);
+        dataLen = sv.getUint32(u32Ptr + GhosttyStringLayout.offset.len, true);
       }
       void view;
 
@@ -1586,7 +1615,7 @@ export class GhosttyTerminal {
    */
   markClean(): void {
     const p = this.exports.ghostty_wasm_alloc(4);
-    new DataView(this.memory.buffer).setUint32(p, DirtyState.NONE, true);
+    new DataView(this.memory.buffer).setUint32(p, DirtyState.FALSE, true);
     this.exports.ghostty_render_state_set(this.renderHandle, RenderStateOption.DIRTY, p);
     this.exports.ghostty_wasm_free(p, 4);
 
@@ -1655,9 +1684,9 @@ export class GhosttyTerminal {
     // Reusable scratch buffers — declared once outside the loops since cell
     // counts are dominant. 4 bytes covers u32 (grapheme len, codepoint).
     // 3 bytes covers GhosttyColorRgb. 1 byte covers per-row dirty bool.
-    // Style is the 16-byte frozen GhosttyStyle struct (see GHOSTTY_STYLE_SIZE
+    // Style is the 16-byte frozen GhosttyStyle struct (see GhosttyStyleLayout.size
     // in types.ts); the populator fills it on each call.
-    const STYLE_SIZE = GHOSTTY_STYLE_SIZE;
+    const STYLE_SIZE = GhosttyStyleLayout.size;
     const u32Ptr = this.exports.ghostty_wasm_alloc(4);
     const rgbPtr = this.exports.ghostty_wasm_alloc(3);
     const dirtyPtr = this.exports.ghostty_wasm_alloc(1);
@@ -1679,7 +1708,7 @@ export class GhosttyTerminal {
     const graphemeBufPtr = this.exports.ghostty_wasm_alloc(GRAPHEME_SCRATCH_BYTES);
     // GRAPHEMES_BUF takes a GhosttyCodepointBuffer descriptor; its ptr/cap
     // are re-pointed per cell at whichever scratch buffer is in use.
-    const cpBufPtr = this.exports.ghostty_wasm_alloc(CODEPOINT_BUFFER_SIZE);
+    const cpBufPtr = this.exports.ghostty_wasm_alloc(GhosttyCodepointBufferLayout.size);
     // Populate the row meta caches as a side effect — saves a redundant
     // iterator walk if the renderer also calls isRowDirty() / isRowWrapped()
     // on this snapshot.
@@ -1749,7 +1778,7 @@ export class GhosttyTerminal {
             try {
               const desc = new DataView(this.memory.buffer);
               desc.setUint32(cpBufPtr, bufPtr, true);
-              desc.setUint32(cpBufPtr + CODEPOINT_BUFFER_CAP_OFFSET, graphemeLen, true);
+              desc.setUint32(cpBufPtr + GhosttyCodepointBufferLayout.offset.cap, graphemeLen, true);
               this.exports.ghostty_render_state_row_cells_get(
                 this.rowCells,
                 RowCellsData.GRAPHEMES_BUF,
@@ -1818,7 +1847,10 @@ export class GhosttyTerminal {
             stylePtr
           );
           cell.flags = this.styleFlagsToCellFlags(
-            new DataView(this.memory.buffer).getUint16(stylePtr + GHOSTTY_STYLE_FLAGS_OFFSET, true)
+            new DataView(this.memory.buffer).getUint16(
+              stylePtr + GhosttyStyleLayout.offset.flags,
+              true
+            )
           );
 
           // Read the raw cell value once, then use it to query per-cell
@@ -1865,7 +1897,7 @@ export class GhosttyTerminal {
       this.exports.ghostty_wasm_free(cellRawPtr, 8);
       this.exports.ghostty_wasm_free(widePtr, 4);
       this.exports.ghostty_wasm_free(graphemeBufPtr, GRAPHEME_SCRATCH_BYTES);
-      this.exports.ghostty_wasm_free(cpBufPtr, CODEPOINT_BUFFER_SIZE);
+      this.exports.ghostty_wasm_free(cpBufPtr, GhosttyCodepointBufferLayout.size);
     }
 
     this.rowDirtyCache = dirtyCache;
@@ -1929,7 +1961,7 @@ export class GhosttyTerminal {
 
   /** For compatibility with old API */
   isDirty(): boolean {
-    return this.update() !== DirtyState.NONE;
+    return this.update() !== DirtyState.FALSE;
   }
 
   /**
@@ -2006,7 +2038,7 @@ export class GhosttyTerminal {
    */
   isScrollbackRowWrapped(offset: number): boolean {
     const pointPtr = this.allocPoint(PointTag.HISTORY, 0, offset);
-    const refPtr = this.exports.ghostty_wasm_alloc(GRID_REF_SIZE);
+    const refPtr = this.exports.ghostty_wasm_alloc(GhosttyGridRefLayout.size);
     const rowPtr = this.exports.ghostty_wasm_alloc(8);
     const wrapPtr = this.exports.ghostty_wasm_alloc(1);
     try {
@@ -2023,7 +2055,7 @@ export class GhosttyTerminal {
       return new DataView(this.memory.buffer).getUint8(wrapPtr) !== 0;
     } finally {
       this.exports.ghostty_wasm_free(pointPtr, 24);
-      this.exports.ghostty_wasm_free(refPtr, GRID_REF_SIZE);
+      this.exports.ghostty_wasm_free(refPtr, GhosttyGridRefLayout.size);
       this.exports.ghostty_wasm_free(rowPtr, 8);
       this.exports.ghostty_wasm_free(wrapPtr, 1);
     }
@@ -2050,13 +2082,9 @@ export class GhosttyTerminal {
   // ==========================================================================
   // grid_ref helpers
   //
-  // GhosttyPoint  : 24 bytes (tag@0:u32, value@8:union 16 bytes).
-  //                 The union's first member is GhosttyPointCoordinate
-  //                 (x@0:u16, y@4:u32).
-  // GhosttyGridRef: 8 bytes (node@0:opaque, x@4:u16, y@6:u16).
-  //                 x/y are public so we can step
-  //                 along a row by mutating ref.x in place rather than
-  //                 re-resolving the point per cell.
+  // Layouts come from GhosttyPointLayout / GhosttyGridRefLayout. GridRef's
+  // x/y are public so we can step along a row by mutating ref.x in place
+  // rather than re-resolving the point per cell.
   //
   // A grid ref is invalidated by ANY terminal mutation. The whole helper
   // body must run between vt_writes — read everything we need, copy out,
@@ -2065,7 +2093,7 @@ export class GhosttyTerminal {
 
   private readGridLine(tag: PointTag, y: number): GhosttyCell[] | null {
     const pointPtr = this.allocPoint(tag, 0, y);
-    const refPtr = this.exports.ghostty_wasm_alloc(GRID_REF_SIZE);
+    const refPtr = this.exports.ghostty_wasm_alloc(GhosttyGridRefLayout.size);
     try {
       if (this.exports.ghostty_terminal_grid_ref(this.handle, pointPtr, refPtr) !== 0) {
         return null;
@@ -2094,8 +2122,8 @@ export class GhosttyTerminal {
       const GRAPHEME_SCRATCH_CODEPOINTS = 32;
       const GRAPHEME_SCRATCH_BYTES = GRAPHEME_SCRATCH_CODEPOINTS * 4;
       const graphemeBufPtr = this.exports.ghostty_wasm_alloc(GRAPHEME_SCRATCH_BYTES);
-      // Style is the 16-byte frozen GhosttyStyle struct (GHOSTTY_STYLE_SIZE).
-      const STYLE_SIZE = GHOSTTY_STYLE_SIZE;
+      // Style is the 16-byte frozen GhosttyStyle struct (GhosttyStyleLayout.size).
+      const STYLE_SIZE = GhosttyStyleLayout.size;
       const stylePtr = this.exports.ghostty_wasm_alloc(STYLE_SIZE);
       try {
         let rowHasGrapheme = false;
@@ -2108,7 +2136,11 @@ export class GhosttyTerminal {
 
         for (let col = 0; col < this._cols; col++) {
           // Step along the row by mutating ref.x in place.
-          new DataView(this.memory.buffer).setUint16(refPtr + GRID_REF_X_OFFSET, col, true);
+          new DataView(this.memory.buffer).setUint16(
+            refPtr + GhosttyGridRefLayout.offset.x,
+            col,
+            true
+          );
           if (this.exports.ghostty_grid_ref_cell(refPtr, cellPtr) !== 0) {
             cells[col] = this.makeEmptyCell();
             continue;
@@ -2180,16 +2212,16 @@ export class GhosttyTerminal {
           if (styleOk) {
             const v = new DataView(this.memory.buffer);
             cell.flags = this.styleFlagsToCellFlags(
-              v.getUint16(stylePtr + GHOSTTY_STYLE_FLAGS_OFFSET, true)
+              v.getUint16(stylePtr + GhosttyStyleLayout.offset.flags, true)
             );
             this.resolveStyleColor(
-              stylePtr + GHOSTTY_STYLE_FG_COLOR_OFFSET,
+              stylePtr + GhosttyStyleLayout.offset.fg_color,
               palette,
               cell,
               /*isFg=*/ true
             );
             this.resolveStyleColor(
-              stylePtr + GHOSTTY_STYLE_BG_COLOR_OFFSET,
+              stylePtr + GhosttyStyleLayout.offset.bg_color,
               palette,
               cell,
               /*isFg=*/ false
@@ -2211,7 +2243,7 @@ export class GhosttyTerminal {
       return cells;
     } finally {
       this.exports.ghostty_wasm_free(pointPtr, 24);
-      this.exports.ghostty_wasm_free(refPtr, GRID_REF_SIZE);
+      this.exports.ghostty_wasm_free(refPtr, GhosttyGridRefLayout.size);
     }
   }
 
@@ -2247,22 +2279,23 @@ export class GhosttyTerminal {
     isFg: boolean
   ): void {
     const view = new DataView(this.memory.buffer);
-    const tag = view.getUint8(colorPtr + 0);
+    const tag = view.getUint8(colorPtr + GhosttyStyleColorLayout.offset.tag);
+    const valuePtr = colorPtr + GhosttyStyleColorLayout.offset.value;
     let r = 0;
     let g = 0;
     let b = 0;
-    // tag === 0 (NONE): no explicit color — the cell uses the terminal's
-    // default fg/bg. PALETTE / RGB are explicit; record the resolved RGB.
-    const isDefault = tag === 0;
-    if (tag === 1 /* PALETTE */ && palette) {
-      const idx = view.getUint8(colorPtr + 1);
+    // NONE: no explicit color — the cell uses the terminal's default fg/bg.
+    // PALETTE / RGB are explicit; record the resolved RGB.
+    const isDefault = tag === GhosttyStyleColorTag.NONE;
+    if (tag === GhosttyStyleColorTag.PALETTE && palette) {
+      const idx = view.getUint8(valuePtr);
       r = palette[idx * 3 + 0]!;
       g = palette[idx * 3 + 1]!;
       b = palette[idx * 3 + 2]!;
-    } else if (tag === 2 /* RGB */) {
-      r = view.getUint8(colorPtr + 1);
-      g = view.getUint8(colorPtr + 2);
-      b = view.getUint8(colorPtr + 3);
+    } else if (tag === GhosttyStyleColorTag.RGB) {
+      r = view.getUint8(valuePtr + GhosttyColorRgbLayout.offset.r);
+      g = view.getUint8(valuePtr + GhosttyColorRgbLayout.offset.g);
+      b = view.getUint8(valuePtr + GhosttyColorRgbLayout.offset.b);
     }
     if (isFg) {
       cell.fg_r = r;
@@ -2279,7 +2312,7 @@ export class GhosttyTerminal {
 
   private readHyperlinkUri(tag: PointTag, y: number, col: number): string | null {
     const pointPtr = this.allocPoint(tag, col, y);
-    const refPtr = this.exports.ghostty_wasm_alloc(GRID_REF_SIZE);
+    const refPtr = this.exports.ghostty_wasm_alloc(GhosttyGridRefLayout.size);
     try {
       if (this.exports.ghostty_terminal_grid_ref(this.handle, pointPtr, refPtr) !== 0) {
         return null;
@@ -2287,7 +2320,7 @@ export class GhosttyTerminal {
       return this.readHyperlinkUriFromRef(refPtr);
     } finally {
       this.exports.ghostty_wasm_free(pointPtr, 24);
-      this.exports.ghostty_wasm_free(refPtr, GRID_REF_SIZE);
+      this.exports.ghostty_wasm_free(refPtr, GhosttyGridRefLayout.size);
     }
   }
 
@@ -2320,14 +2353,14 @@ export class GhosttyTerminal {
   }
 
   private allocPoint(tag: PointTag, x: number, y: number): number {
-    // GhosttyPoint = { tag: u32 @ 0, padding: 4, value.coordinate: { x: u16 @ 0, y: u32 @ 4 } @ 8 }
-    const ptr = this.exports.ghostty_wasm_alloc(24);
+    const ptr = this.exports.ghostty_wasm_alloc(GhosttyPointLayout.size);
     const view = new DataView(this.memory.buffer);
     // Zero the padding bytes too, since we don't want stale memory in the union.
-    new Uint8Array(this.memory.buffer, ptr, 24).fill(0);
-    view.setUint32(ptr + 0, tag, true);
-    view.setUint16(ptr + 8, x, true);
-    view.setUint32(ptr + 12, y, true);
+    new Uint8Array(this.memory.buffer, ptr, GhosttyPointLayout.size).fill(0);
+    const coord = ptr + GhosttyPointLayout.offset.value + GhosttyPointValueLayout.offset.coordinate;
+    view.setUint32(ptr + GhosttyPointLayout.offset.tag, tag, true);
+    view.setUint16(coord + GhosttyPointCoordinateLayout.offset.x, x, true);
+    view.setUint32(coord + GhosttyPointCoordinateLayout.offset.y, y, true);
     return ptr;
   }
 
@@ -2417,31 +2450,31 @@ export class GhosttyTerminal {
       const programStatusDispatch: ProgramStatusCallback = (handle, _userdata, ptr) => {
         const term = instancesByHandle.get(handle);
         if (!term) return;
-        // GhosttyTerminalProgramStatus (frozen ABI), wasm32: state@0, kind@4,
-        // progress:i8@8, then four {ptr:u32,len:u32} strings at 12..43.
+        // GhosttyTerminalProgramStatus; the strings are borrowed GhosttyStrings.
         const view = new DataView(term.memory.buffer);
+        const o = GhosttyTerminalProgramStatusLayout.offset;
         const states = ['idle', 'working', 'done', 'blocked', 'error', 'clear'] as const;
         const kinds = [null, 'permission', 'question', 'auth'] as const;
-        const state = states[view.getUint32(ptr, true)];
-        const kind = kinds[view.getUint32(ptr + 4, true)];
+        const state = states[view.getUint32(ptr + o.state, true)];
+        const kind = kinds[view.getUint32(ptr + o.kind, true)];
         if (state === undefined || kind === undefined) return;
         const text = (offset: number) =>
           new TextDecoder().decode(
             new Uint8Array(
               term.memory.buffer,
-              view.getUint32(ptr + offset, true),
-              view.getUint32(ptr + offset + 4, true)
+              view.getUint32(ptr + offset + GhosttyStringLayout.offset.ptr, true),
+              view.getUint32(ptr + offset + GhosttyStringLayout.offset.len, true)
             )
           );
-        const progress = view.getInt8(ptr + 8);
+        const progress = view.getInt8(ptr + o.progress);
         term.pendingProgramStatus.push({
           state,
           kind,
           progress: progress < 0 ? null : progress,
-          id: text(12),
-          app: text(20),
-          title: text(28),
-          message: text(36),
+          id: text(o.id),
+          app: text(o.app),
+          title: text(o.title),
+          message: text(o.message),
         });
       };
       const sizeDispatch: SizeCallback = (handle, _userdata, outSizePtr) => {
@@ -2452,13 +2485,12 @@ export class GhosttyTerminal {
         // size query, matching coder's old behavior for unconfigured
         // pixel sizes.
         if (term.cellWidthPx === 0 || term.cellHeightPx === 0) return 0;
-        // GhosttySizeReportSize: rows@0:u16, cols@2:u16, cell_w@4:u32,
-        // cell_h@8:u32 (12 bytes total).
         const view = new DataView(term.memory.buffer);
-        view.setUint16(outSizePtr + 0, term._rows, true);
-        view.setUint16(outSizePtr + 2, term._cols, true);
-        view.setUint32(outSizePtr + 4, term.cellWidthPx, true);
-        view.setUint32(outSizePtr + 8, term.cellHeightPx, true);
+        const o = GhosttySizeReportSizeLayout.offset;
+        view.setUint16(outSizePtr + o.rows, term._rows, true);
+        view.setUint16(outSizePtr + o.columns, term._cols, true);
+        view.setUint32(outSizePtr + o.cell_width, term.cellWidthPx, true);
+        view.setUint32(outSizePtr + o.cell_height, term.cellHeightPx, true);
         return 1;
       };
       // PNG decoder dispatcher. Called by ghostty when it needs to
@@ -2493,10 +2525,11 @@ export class GhosttyTerminal {
           if (outBuf === 0) return 0;
           new Uint8Array(memory.buffer, outBuf, rgba.length).set(rgba);
           const view = new DataView(memory.buffer);
-          view.setUint32(outImagePtr + 0, img.width, true);
-          view.setUint32(outImagePtr + 4, img.height, true);
-          view.setUint32(outImagePtr + 8, outBuf, true);
-          view.setUint32(outImagePtr + 12, rgba.length, true);
+          const o = GhosttySysImageLayout.offset;
+          view.setUint32(outImagePtr + o.width, img.width, true);
+          view.setUint32(outImagePtr + o.height, img.height, true);
+          view.setUint32(outImagePtr + o.data, outBuf, true);
+          view.setUint32(outImagePtr + o.data_len, rgba.length, true);
           return 1;
         } catch {
           return 0;
@@ -2530,10 +2563,11 @@ export class GhosttyTerminal {
           // Allocation may grow the WASM memory: acquire fresh views afterwards.
           new Uint8Array(memory.buffer, outBuf, byteLength).set(bytes);
           const view = new DataView(memory.buffer);
-          view.setUint32(outImagePtr + 0, 0, true);
-          view.setUint32(outImagePtr + 4, 0, true);
-          view.setUint32(outImagePtr + 8, outBuf, true);
-          view.setUint32(outImagePtr + 12, byteLength, true);
+          const o = GhosttySysImageLayout.offset;
+          view.setUint32(outImagePtr + o.width, 0, true);
+          view.setUint32(outImagePtr + o.height, 0, true);
+          view.setUint32(outImagePtr + o.data, outBuf, true);
+          view.setUint32(outImagePtr + o.data_len, byteLength, true);
           return 1;
         } catch {
           if (outBuf !== 0) exports.ghostty_free(allocator, outBuf, byteLength);
@@ -2566,17 +2600,18 @@ export class GhosttyTerminal {
       // Shared decoders for borrowed payload structs. Strings are copied
       // before the callback returns.
       const utf8 = new TextDecoder();
+      const str = GhosttyStringLayout.offset;
       const readString = (term: GhosttyTerminal, ptr: number): string => {
         const view = new DataView(term.memory.buffer);
-        const dataPtr = view.getUint32(ptr, true);
-        const len = view.getUint32(ptr + 4, true);
+        const dataPtr = view.getUint32(ptr + str.ptr, true);
+        const len = view.getUint32(ptr + str.len, true);
         if (dataPtr === 0 || len === 0) return '';
         return utf8.decode(new Uint8Array(term.memory.buffer, dataPtr, len));
       };
       const readBytes = (term: GhosttyTerminal, ptr: number): Uint8Array => {
         const view = new DataView(term.memory.buffer);
-        const dataPtr = view.getUint32(ptr, true);
-        const len = view.getUint32(ptr + 4, true);
+        const dataPtr = view.getUint32(ptr + str.ptr, true);
+        const len = view.getUint32(ptr + str.len, true);
         if (dataPtr === 0 || len === 0) return new Uint8Array(0);
         return new Uint8Array(term.memory.buffer, dataPtr, len).slice();
       };
@@ -2587,93 +2622,105 @@ export class GhosttyTerminal {
         return typeof fn === 'function' ? (fn as (request: number, reply: number) => void) : null;
       };
 
-      // GhosttyClipboardWrite, wasm32 (32 bytes): location@0, contents@4,
-      // contents_len@8, name{ptr@12,len@16}, granted@20, can_remember@21,
-      // ctx@24, reply@28. GhosttyClipboardContent is 16 bytes:
-      // mime{ptr@0,len@4}, data{ptr@8,len@12}.
+      const content = GhosttyClipboardContentLayout;
+      const writeResults: Record<ClipboardWriteResult, GhosttyClipboardWriteResult> = {
+        success: GhosttyClipboardWriteResult.SUCCESS,
+        denied: GhosttyClipboardWriteResult.DENIED,
+        unsupported: GhosttyClipboardWriteResult.UNSUPPORTED,
+      };
       const clipboardWriteDispatch: PayloadCallback = (handle, _userdata, ptr) => {
         const term = instancesByHandle.get(handle);
         if (!term) return;
         const view = new DataView(term.memory.buffer);
-        const contentsPtr = view.getUint32(ptr + 4, true);
-        const contentsLen = view.getUint32(ptr + 8, true);
+        const o = GhosttyClipboardWriteLayout.offset;
+        const contentsPtr = view.getUint32(ptr + o.contents, true);
+        const contentsLen = view.getUint32(ptr + o.contents_len, true);
         const contents: ClipboardContent[] = [];
         for (let i = 0; i < contentsLen; i++) {
-          const entry = contentsPtr + i * 16;
-          contents.push({ mime: readString(term, entry), data: readBytes(term, entry + 8) });
+          const entry = contentsPtr + i * content.size;
+          contents.push({
+            mime: readString(term, entry + content.offset.mime),
+            data: readBytes(term, entry + content.offset.data),
+          });
         }
         const textEntry = contents.find((c) => c.mime.startsWith('text/'));
         const event: ClipboardWriteEvent = {
-          location: locations[view.getUint32(ptr, true)] ?? 'standard',
+          location: locations[view.getUint32(ptr + o.location, true)] ?? 'standard',
           text: textEntry ? utf8.decode(textEntry.data) : null,
           contents,
-          program: readString(term, ptr + 12),
-          granted: view.getUint8(ptr + 20) !== 0,
+          program: readString(term, ptr + o.name),
+          granted: view.getUint8(ptr + o.granted) !== 0,
         };
         const decision = term.clipboardWritePolicy?.(event);
         if (decision === undefined) return; // no policy: returning denies the write
-        const reply = replyFn(view.getUint32(ptr + 28, true));
+        const reply = replyFn(view.getUint32(ptr + o.reply, true));
         if (!reply) return;
-        // GhosttyClipboardWriteReply (sized, 12 bytes): size@0, result@4, remember@8.
-        const replyPtr = term.exports.ghostty_wasm_alloc(12);
+        const replyLayout = GhosttyClipboardWriteReplyLayout;
+        const replyPtr = term.exports.ghostty_wasm_alloc(replyLayout.size);
         try {
           const rv = new DataView(term.memory.buffer);
-          rv.setUint32(replyPtr, 12, true);
-          rv.setUint32(replyPtr + 4, { success: 0, denied: 1, unsupported: 2 }[decision], true);
-          rv.setUint8(replyPtr + 8, 0);
+          rv.setUint32(replyPtr + replyLayout.offset.size, replyLayout.size, true);
+          rv.setUint32(replyPtr + replyLayout.offset.result, writeResults[decision], true);
+          rv.setUint8(replyPtr + replyLayout.offset.remember, 0);
           reply(ptr, replyPtr);
         } finally {
-          term.exports.ghostty_wasm_free(replyPtr, 12);
+          term.exports.ghostty_wasm_free(replyPtr, replyLayout.size);
         }
         if (decision === 'success') term.pendingClipboardWrites.push(event);
       };
 
-      // GhosttyClipboardRead, wasm32 (36 bytes): location@0, mimes@4,
-      // mimes_len@8, list@12, name{ptr@16,len@20}, granted@24,
-      // can_remember@25, ctx@28, reply@32.
       const clipboardReadDispatch: PayloadCallback = (handle, _userdata, ptr) => {
         const term = instancesByHandle.get(handle);
         if (!term || !term.clipboardReadHandler) return; // no reply: empty clipboard
         const view = new DataView(term.memory.buffer);
-        const mimesPtr = view.getUint32(ptr + 4, true);
-        const mimesLen = view.getUint32(ptr + 8, true);
+        const o = GhosttyClipboardReadLayout.offset;
+        const mimesPtr = view.getUint32(ptr + o.mimes, true);
+        const mimesLen = view.getUint32(ptr + o.mimes_len, true);
         const mimes: string[] = [];
-        for (let i = 0; i < mimesLen; i++) mimes.push(readString(term, mimesPtr + i * 8));
+        for (let i = 0; i < mimesLen; i++) {
+          mimes.push(readString(term, mimesPtr + i * GhosttyStringLayout.size));
+        }
         const text = term.clipboardReadHandler({
-          location: locations[view.getUint32(ptr, true)] ?? 'standard',
+          location: locations[view.getUint32(ptr + o.location, true)] ?? 'standard',
           mimes,
-          list: view.getUint8(ptr + 12) !== 0,
-          program: readString(term, ptr + 16),
-          granted: view.getUint8(ptr + 24) !== 0,
+          list: view.getUint8(ptr + o.list) !== 0,
+          program: readString(term, ptr + o.name),
+          granted: view.getUint8(ptr + o.granted) !== 0,
         });
-        const reply = replyFn(view.getUint32(ptr + 32, true));
+        const reply = replyFn(view.getUint32(ptr + o.reply, true));
         if (!reply) return;
-        // GhosttyClipboardReadReply (sized, 28 bytes): size@0, result@4,
-        // contents@8, contents_len@12, available@16, available_len@20,
-        // remember@24. One text/plain GhosttyClipboardContent on success.
+        // Reply with one text/plain GhosttyClipboardContent on success; the
+        // reply struct, content struct and bytes share one allocation.
+        const replyLayout = GhosttyClipboardReadReplyLayout;
+        const r = replyLayout.offset;
         const mime = new TextEncoder().encode('text/plain');
         const data = text === null ? new Uint8Array(0) : new TextEncoder().encode(text);
-        const total = 28 + 16 + mime.length + data.length;
+        const total = replyLayout.size + content.size + mime.length + data.length;
         const buf = term.exports.ghostty_wasm_alloc(total);
         try {
           const mem = new Uint8Array(term.memory.buffer);
           const rv = new DataView(term.memory.buffer);
-          const contentPtr = buf + 28;
-          const mimePtr = contentPtr + 16;
+          const contentPtr = buf + replyLayout.size;
+          const mimePtr = contentPtr + content.size;
           const dataPtr = mimePtr + mime.length;
           mem.set(mime, mimePtr);
           mem.set(data, dataPtr);
-          rv.setUint32(contentPtr, mimePtr, true);
-          rv.setUint32(contentPtr + 4, mime.length, true);
-          rv.setUint32(contentPtr + 8, dataPtr, true);
-          rv.setUint32(contentPtr + 12, data.length, true);
-          rv.setUint32(buf, 28, true);
-          rv.setUint32(buf + 4, text === null ? 1 /* DENIED */ : 0 /* SUCCESS */, true);
-          rv.setUint32(buf + 8, text === null ? 0 : contentPtr, true);
-          rv.setUint32(buf + 12, text === null ? 0 : 1, true);
-          rv.setUint32(buf + 16, 0, true);
-          rv.setUint32(buf + 20, 0, true);
-          rv.setUint8(buf + 24, 0);
+          rv.setUint32(contentPtr + content.offset.mime + str.ptr, mimePtr, true);
+          rv.setUint32(contentPtr + content.offset.mime + str.len, mime.length, true);
+          rv.setUint32(contentPtr + content.offset.data + str.ptr, dataPtr, true);
+          rv.setUint32(contentPtr + content.offset.data + str.len, data.length, true);
+          const denied = text === null;
+          rv.setUint32(buf + r.size, replyLayout.size, true);
+          rv.setUint32(
+            buf + r.result,
+            denied ? GhosttyClipboardReadResult.DENIED : GhosttyClipboardReadResult.SUCCESS,
+            true
+          );
+          rv.setUint32(buf + r.contents, denied ? 0 : contentPtr, true);
+          rv.setUint32(buf + r.contents_len, denied ? 0 : 1, true);
+          rv.setUint32(buf + r.available, 0, true);
+          rv.setUint32(buf + r.available_len, 0, true);
+          rv.setUint8(buf + r.remember, 0);
           reply(ptr, buf);
         } finally {
           term.exports.ghostty_wasm_free(buf, total);
@@ -2686,30 +2733,29 @@ export class GhosttyTerminal {
         term.pendingPwdChanges.push(term.getPwd());
       };
 
-      // GhosttyTerminalDesktopNotification (16 bytes): title{ptr@0,len@4}, body{ptr@8,len@12}.
       const desktopNotificationDispatch: PayloadCallback = (handle, _userdata, ptr) => {
         const term = instancesByHandle.get(handle);
         if (!term) return;
+        const o = GhosttyTerminalDesktopNotificationLayout.offset;
         term.pendingNotifications.push({
-          title: readString(term, ptr),
-          body: readString(term, ptr + 8),
+          title: readString(term, ptr + o.title),
+          body: readString(term, ptr + o.body),
         });
       };
 
-      // GhosttyTerminalProgressReport (8 bytes): state@0 (u32), progress@4 (i8, -1 = none).
+      // progress is an i8; -1 means "no percentage".
       const progressStates = ['remove', 'set', 'error', 'indeterminate', 'pause'] as const;
       const progressReportDispatch: PayloadCallback = (handle, _userdata, ptr) => {
         const term = instancesByHandle.get(handle);
         if (!term) return;
         const view = new DataView(term.memory.buffer);
-        const state = progressStates[view.getUint32(ptr, true)];
+        const o = GhosttyTerminalProgressReportLayout.offset;
+        const state = progressStates[view.getUint32(ptr + o.state, true)];
         if (!state) return;
-        const progress = view.getInt8(ptr + 4);
+        const progress = view.getInt8(ptr + o.progress);
         term.pendingProgress.push({ state, progress: progress < 0 ? null : progress });
       };
 
-      // GhosttyTerminalSemanticPrompt (32 bytes): kind@0, prompt_kind@4,
-      // has_exit_code@8, exit_code@12 (i32), command{ptr@16,len@20}, error{ptr@24,len@28}.
       const promptKinds = [
         undefined,
         'prompt-start',
@@ -2722,37 +2768,47 @@ export class GhosttyTerminal {
         const term = instancesByHandle.get(handle);
         if (!term) return;
         const view = new DataView(term.memory.buffer);
-        const kind = promptKinds[view.getUint32(ptr, true)];
-        const promptKind = promptPromptKinds[view.getUint32(ptr + 4, true)];
+        const o = GhosttyTerminalSemanticPromptLayout.offset;
+        const kind = promptKinds[view.getUint32(ptr + o.kind, true)];
+        const promptKind = promptPromptKinds[view.getUint32(ptr + o.prompt_kind, true)];
         if (!kind || !promptKind) return;
         term.pendingSemanticPrompts.push({
           kind,
           promptKind,
-          exitCode: view.getUint8(ptr + 8) !== 0 ? view.getInt32(ptr + 12, true) : null,
-          command: readString(term, ptr + 16),
-          error: readString(term, ptr + 24),
+          exitCode:
+            view.getUint8(ptr + o.has_exit_code) !== 0
+              ? view.getInt32(ptr + o.exit_code, true)
+              : null,
+          command: readString(term, ptr + o.command),
+          error: readString(term, ptr + o.error),
         });
       };
 
-      // GhosttyTerminalResizeWindow: tag@0; value union @8 (u64-aligned):
-      // GRID is rows@8 (u16), columns@10 (u16). Unknown tags are ignored.
+      // Unknown resize tags are ignored.
       const resizeWindowDispatch: PayloadCallback = (handle, _userdata, ptr) => {
         const term = instancesByHandle.get(handle);
         if (!term) return;
         const view = new DataView(term.memory.buffer);
-        if (view.getUint32(ptr, true) !== 0 /* GRID */) return;
+        const o = GhosttyTerminalResizeWindowLayout.offset;
+        if (view.getUint32(ptr + o.tag, true) !== GhosttyTerminalResizeWindowTag.GRID) return;
+        const grid = ptr + o.value + GhosttyTerminalResizeWindowValueLayout.offset.grid;
+        const g = GhosttyTerminalResizeWindowGridLayout.offset;
         term.pendingResizeRequests.push({
-          rows: view.getUint16(ptr + 8, true),
-          cols: view.getUint16(ptr + 10, true),
+          rows: view.getUint16(grid + g.rows, true),
+          cols: view.getUint16(grid + g.columns, true),
         });
       };
 
-      // COLOR_SCHEME: write GhosttyColorScheme (LIGHT=0, DARK=1) and return true.
+      // COLOR_SCHEME: write a GhosttyColorScheme and return true.
       const colorSchemeDispatch: ColorSchemeCallback = (handle, _userdata, outPtr) => {
         const term = instancesByHandle.get(handle);
         const scheme = term?.colorSchemeProvider?.();
         if (!scheme) return 0;
-        new DataView(term!.memory.buffer).setUint32(outPtr, scheme === 'dark' ? 1 : 0, true);
+        new DataView(term!.memory.buffer).setUint32(
+          outPtr,
+          scheme === 'dark' ? GhosttyColorScheme.DARK : GhosttyColorScheme.LIGHT,
+          true
+        );
         return 1;
       };
 
@@ -2870,13 +2926,14 @@ export class GhosttyTerminal {
    * @param isAnsi True for ANSI modes, false for DEC modes (default: false)
    */
   getMode(mode: number, isAnsi: boolean = false): boolean {
-    const out = this.exports.ghostty_wasm_alloc(4);
+    const o = GhosttyTerminalModeConfigLayout.offset;
+    const out = this.exports.ghostty_wasm_alloc(GhosttyTerminalModeConfigLayout.size);
     try {
-      new DataView(this.memory.buffer).setUint16(out, packMode(mode, isAnsi), true);
+      new DataView(this.memory.buffer).setUint16(out + o.mode, packMode(mode, isAnsi), true);
       const result = this.exports.ghostty_terminal_get(this.handle, TerminalData.MODE, out);
-      return result === 0 && new DataView(this.memory.buffer).getUint8(out + 2) !== 0;
+      return result === 0 && new DataView(this.memory.buffer).getUint8(out + o.value) !== 0;
     } finally {
-      this.exports.ghostty_wasm_free(out, 4);
+      this.exports.ghostty_wasm_free(out, GhosttyTerminalModeConfigLayout.size);
     }
   }
 
@@ -2976,12 +3033,12 @@ export class GhosttyTerminal {
 
     const bufBytes = len * 4;
     const bufPtr = this.exports.ghostty_wasm_alloc(bufBytes);
-    const descPtr = this.exports.ghostty_wasm_alloc(CODEPOINT_BUFFER_SIZE);
+    const descPtr = this.exports.ghostty_wasm_alloc(GhosttyCodepointBufferLayout.size);
     try {
       // GhosttyCodepointBuffer { ptr, cap, len }: point it at bufPtr.
       const desc = new DataView(this.memory.buffer);
       desc.setUint32(descPtr, bufPtr, true);
-      desc.setUint32(descPtr + CODEPOINT_BUFFER_CAP_OFFSET, len, true);
+      desc.setUint32(descPtr + GhosttyCodepointBufferLayout.offset.cap, len, true);
       if (
         this.exports.ghostty_render_state_row_cells_get(
           this.rowCells,
@@ -2995,7 +3052,7 @@ export class GhosttyTerminal {
       // buffer and a subsequent allocation could detach it.
       return Array.from(new Uint32Array(this.memory.buffer, bufPtr, len));
     } finally {
-      this.exports.ghostty_wasm_free(descPtr, CODEPOINT_BUFFER_SIZE);
+      this.exports.ghostty_wasm_free(descPtr, GhosttyCodepointBufferLayout.size);
       this.exports.ghostty_wasm_free(bufPtr, bufBytes);
     }
   }
@@ -3020,7 +3077,7 @@ export class GhosttyTerminal {
     if (col < 0 || col >= this._cols) return null;
 
     const pointPtr = this.allocPoint(PointTag.HISTORY, col, offset);
-    const refPtr = this.exports.ghostty_wasm_alloc(GRID_REF_SIZE);
+    const refPtr = this.exports.ghostty_wasm_alloc(GhosttyGridRefLayout.size);
     try {
       if (this.exports.ghostty_terminal_grid_ref(this.handle, pointPtr, refPtr) !== 0) {
         return null;
@@ -3048,7 +3105,7 @@ export class GhosttyTerminal {
       }
     } finally {
       this.exports.ghostty_wasm_free(pointPtr, 24);
-      this.exports.ghostty_wasm_free(refPtr, GRID_REF_SIZE);
+      this.exports.ghostty_wasm_free(refPtr, GhosttyGridRefLayout.size);
     }
   }
 

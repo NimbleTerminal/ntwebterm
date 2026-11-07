@@ -76,16 +76,18 @@ Ghostty WASM Bridge (lib/ghostty.ts)
 
 ### Key Files
 
-| File                       | Lines | Purpose                             |
-| -------------------------- | ----- | ----------------------------------- |
-| `lib/terminal.ts`          | 427   | Main Terminal class, xterm.js API   |
-| `lib/ghostty.ts`           | 552   | WASM bridge, memory management      |
-| `lib/renderer-canvas2d.ts` | ~1700 | Canvas2D renderer (CanvasRenderer)  |
-| `lib/input-handler.ts`     | 438   | Keyboard → escape sequences         |
-| `lib/selection-manager.ts` | 442   | Text selection + clipboard          |
-| `lib/types.ts`             | 454   | TypeScript definitions for WASM ABI |
-| `lib/addons/fit.ts`        | 240   | Responsive terminal sizing          |
-| `demo/bin/demo.js`         | ~710  | HTTP + WebSocket PTY demo server    |
+| File                         | Lines | Purpose                                            |
+| ---------------------------- | ----- | -------------------------------------------------- |
+| `lib/terminal.ts`            | 427   | Main Terminal class, xterm.js API                  |
+| `lib/ghostty.ts`             | 552   | WASM bridge, memory management                     |
+| `lib/renderer-canvas2d.ts`   | ~1700 | Canvas2D renderer (CanvasRenderer)                 |
+| `lib/input-handler.ts`       | 438   | Keyboard → escape sequences                        |
+| `lib/selection-manager.ts`   | 442   | Text selection + clipboard                         |
+| `lib/types.ts`               | 454   | TypeScript definitions for WASM ABI                |
+| `lib/ghostty-abi.ts`         | ~2000 | GENERATED enums/struct layouts (`bun run gen:abi`) |
+| `scripts/gen-ghostty-abi.ts` | 300   | Generator reading upstream's frozen ABI manifest   |
+| `lib/addons/fit.ts`          | 240   | Responsive terminal sizing                         |
+| `demo/bin/demo.js`           | ~710  | HTTP + WebSocket PTY demo server                   |
 
 ### WASM Integration Pattern
 
@@ -399,6 +401,13 @@ window.addEventListener('resize', () => fitAddon.fit());
 
 - Feature needs to be added to Ghostty upstream
 - Then rebuild WASM binary
+
+### Sync to a New libghostty-vt Release
+
+1. Check out the new `vt-x.y.z` tag in the `ghostty/` submodule.
+2. `bun run build:wasm` (re-applies `patches/ghostty-wasm-api.patch`; fix conflicts by hand).
+3. `bun run gen:abi` to regenerate `lib/ghostty-abi.ts` from upstream's manifest. Never edit that file by hand; if the patch adds to the ABI, describe it in `patches/ghostty-wasm-api.abi.json`.
+4. `bun test` — `lib/ghostty-abi.test.ts` reports stale bindings, manifest/binary mismatches, and exports missing from `symbols.txt`.
 
 ### Fix Rendering Issue
 
