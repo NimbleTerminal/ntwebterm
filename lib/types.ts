@@ -126,6 +126,9 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_version(): number;
   ghostty_build_info(data: number, out: number): number;
 
+  // Paste (ghostty/include/ghostty/vt/paste.h)
+  ghostty_terminal_paste(terminal: number, paste: number, outPasted: number): number;
+
   // Memory helpers
   ghostty_wasm_alloc_opaque(): number;
   ghostty_wasm_free_opaque(ptr: number): void;
@@ -837,6 +840,26 @@ export interface ResizeRequest {
 
 /** Answer to a CSI ? 996 n color scheme query. Mirrors GhosttyColorScheme. */
 export type ColorScheme = 'light' | 'dark';
+
+/** Outcome of a paste: written to the PTY, nothing to write, or refused as unsafe. */
+export type PasteResult = 'pasted' | 'empty' | 'rejected';
+
+/** Options for GhosttyTerminal.paste(), mirroring GhosttyPaste. */
+export interface PasteOptions {
+  /** Clipboard the text came from; reported in a Kitty paste event. Default 'standard'. */
+  location?: ClipboardLocation;
+  /**
+   * 'clipboard' (default) becomes a Kitty paste event when the program asked
+   * for them; 'text' (IME commit, drag and drop) is always written as text.
+   */
+  source?: 'clipboard' | 'text';
+  /**
+   * Write text that could inject commands: a line terminator outside
+   * bracketed paste, or the bracketed paste end marker. Default false, which
+   * makes such a paste return 'rejected'.
+   */
+  allowUnsafe?: boolean;
+}
 
 /**
  * What the loaded libghostty-vt knows about how it was built, read from

@@ -12,6 +12,7 @@ import { decode as decodePng } from 'fast-png';
 import {
   GhosttyBuildInfo,
   GhosttyClipboardContentLayout,
+  GhosttyClipboardLocation,
   GhosttyClipboardReadLayout,
   GhosttyClipboardReadReplyLayout,
   GhosttyClipboardReadResult,
@@ -23,7 +24,10 @@ import {
   GhosttyColorScheme,
   GhosttyGridRefLayout,
   GhosttyKittyGraphicsPlacementRenderInfoLayout,
+  GhosttyMimeReaderLayout,
   GhosttyOptimizeMode,
+  GhosttyPasteLayout,
+  GhosttyPasteSource,
   GhosttyPointCoordinateLayout,
   GhosttyPointLayout,
   GhosttyPointValueLayout,
@@ -43,12 +47,14 @@ import {
   GhosttyTerminalResizeWindowTag,
   GhosttyTerminalResizeWindowValueLayout,
   GhosttyTerminalSemanticPromptLayout,
+  GhosttyWriterLayout,
 } from './ghostty-abi';
 import {
   CellData,
   CellFlags,
   CellWide,
   type ClipboardContent,
+  type ClipboardLocation,
   type ClipboardReadHandler,
   type ClipboardWriteEvent,
   type ClipboardWriteResult,
@@ -70,6 +76,8 @@ import {
   type KittyKeyFlags,
   type KittyPlacementInfo,
   type LibghosttyBuildInfo,
+  type PasteOptions,
+  type PasteResult,
   PointTag,
   type ProgramStatusReport,
   type ProgressReport,
@@ -95,9 +103,11 @@ import {
 import {
   type ColorSchemeCallback,
   type DecodePngCallback,
+  type MimeReaderCallback,
   type NotifyCallback,
   type PayloadCallback,
   type ProgramStatusCallback,
+  type RandomSecureCallback,
   type ReadSharedMemoryCallback,
   type RenderHoldCallback,
   type SizeCallback,
@@ -121,6 +131,12 @@ export {
 /**
  * Main Ghostty WASM wrapper class
  */
+const pasteLocations: Record<ClipboardLocation, GhosttyClipboardLocation> = {
+  standard: GhosttyClipboardLocation.STANDARD,
+  selection: GhosttyClipboardLocation.SELECTION,
+  primary: GhosttyClipboardLocation.PRIMARY,
+};
+
 export class Ghostty {
   private exports: GhosttyWasmExports;
   private memory: WebAssembly.Memory;
@@ -528,6 +544,8 @@ export class GhosttyTerminal {
   private pendingClipboardWrites: ClipboardWriteEvent[] = [];
   /** Answers clipboard reads synchronously, inside the WASM callback. */
   private clipboardReadHandler?: ClipboardReadHandler;
+  /** Text handed to the GhosttyMimeReader during paste(); null otherwise. */
+  private pendingPasteBytes: Uint8Array | null = null;
   private pwdChangeHandler?: (pwd: string) => void;
   private pendingPwdChanges: string[] = [];
   private notificationHandler?: (notification: DesktopNotification) => void;
@@ -733,6 +751,8 @@ export class GhosttyTerminal {
       semanticPromptIndex: number;
       resizeWindowIndex: number;
       colorSchemeIndex: number;
+      mimeReaderIndex: number;
+      randomSecureIndex: number;
       instancesByHandle: Map<number, GhosttyTerminal>;
     }
   >();
@@ -758,6 +778,8 @@ export class GhosttyTerminal {
     semanticPromptIndex: number;
     resizeWindowIndex: number;
     colorSchemeIndex: number;
+    mimeReaderIndex: number;
+    randomSecureIndex: number;
     instancesByHandle: Map<number, GhosttyTerminal>;
   };
 
@@ -2070,6 +2092,66 @@ export class GhosttyTerminal {
     return this.getMode(2004, false);
   }
 
+  /**
+   * Paste text the way libghostty-vt would for a real PTY: a Kitty paste
+   * event when mode 5522 is on and a clipboard read handler is installed,
+   * otherwise the text framed per mode 2004 with unsafe control bytes
+   * replaced by spaces and, unbracketed, newlines turned into carriage
+   * returns. The output lands in the WRITE_PTY queue; drain it with
+   * readResponse().
+   *
+   * Text that could inject commands (a line terminator outside bracketed
+   * paste, or the bracketed paste end marker) is 'rejected' unless
+   * `allowUnsafe` is set. Nothing is written on rejection.
+   */
+  paste(text: string, options: PasteOptions = {}): PasteResult {
+    const utf8 = new TextEncoder();
+    const bytes = utf8.encode(text);
+    const mime = utf8.encode('text/plain');
+    const p = GhosttyPasteLayout;
+    const str = GhosttyStringLayout;
+    // One allocation: GhosttyPaste, a one-entry mimes array, its bytes, out_pasted.
+    const mimesOff = p.size;
+    const mimeBytesOff = mimesOff + str.size;
+    const outOff = mimeBytesOff + mime.length;
+    const total = outOff + 1;
+    const buf = this.exports.ghostty_wasm_alloc(total);
+    if (buf === 0) throw new Error('ghostty_wasm_alloc failed');
+    this.pendingPasteBytes = bytes;
+    try {
+      const mem = new Uint8Array(this.memory.buffer);
+      mem.fill(0, buf, buf + total);
+      mem.set(mime, buf + mimeBytesOff);
+      const view = new DataView(this.memory.buffer);
+      view.setUint32(buf + mimesOff + str.offset.ptr, buf + mimeBytesOff, true);
+      view.setUint32(buf + mimesOff + str.offset.len, mime.length, true);
+      view.setUint32(buf + p.offset.size, p.size, true);
+      view.setUint32(buf + p.offset.location, pasteLocations[options.location ?? 'standard'], true);
+      view.setUint32(
+        buf + p.offset.source,
+        options.source === 'text' ? GhosttyPasteSource.TEXT : GhosttyPasteSource.CLIPBOARD,
+        true
+      );
+      view.setUint32(buf + p.offset.mimes, buf + mimesOff, true);
+      view.setUint32(buf + p.offset.mimes_len, 1, true);
+      const reader = buf + p.offset.reader;
+      const registry = this.callbackRegistry!;
+      view.setUint32(reader + GhosttyMimeReaderLayout.offset.read, registry.mimeReaderIndex, true);
+      view.setUint32(reader + GhosttyMimeReaderLayout.offset.userdata, this.handle, true);
+      view.setUint8(buf + p.offset.allow_unsafe, options.allowUnsafe ? 1 : 0);
+
+      const r = this.exports.ghostty_terminal_paste(this.handle, buf, buf + outOff);
+      if (r === GhosttyResult.REJECTED) return 'rejected';
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(`ghostty_terminal_paste failed: ${GhosttyResult[r] ?? r}`);
+      }
+      return new Uint8Array(this.memory.buffer)[buf + outOff] !== 0 ? 'pasted' : 'empty';
+    } finally {
+      this.pendingPasteBytes = null;
+      this.exports.ghostty_wasm_free(buf, total);
+    }
+  }
+
   hasFocusEvents(): boolean {
     // Mode 1004 = focus events (DEC mode)
     return this.getMode(1004, false);
@@ -2891,6 +2973,38 @@ export class GhosttyTerminal {
         return 1;
       };
 
+      // ghostty_terminal_paste() pulls the text through a GhosttyMimeReader
+      // whose userdata is the terminal handle; the bytes wait in pendingPasteBytes.
+      const mimeReaderDispatch: MimeReaderCallback = (userdata, _mimePtr, writerPtr) => {
+        const term = instancesByHandle.get(userdata);
+        const bytes = term?.pendingPasteBytes;
+        if (!term || !bytes) return 0;
+        if (bytes.length === 0) return 1;
+        const view = new DataView(term.memory.buffer);
+        const w = GhosttyWriterLayout.offset;
+        const writeFn = table.get(view.getUint32(writerPtr + w.write, true));
+        const writerUserdata = view.getUint32(writerPtr + w.userdata, true);
+        if (typeof writeFn !== 'function') return 0;
+        const buf = term.exports.ghostty_wasm_alloc(bytes.length);
+        if (buf === 0) return 0;
+        try {
+          new Uint8Array(term.memory.buffer, buf, bytes.length).set(bytes);
+          const write = writeFn as (userdata: number, data: number, len: number) => number;
+          return write(writerUserdata, buf, bytes.length) ? 1 : 0;
+        } finally {
+          term.exports.ghostty_wasm_free(buf, bytes.length);
+        }
+      };
+      // Secure random bytes for Kitty paste event passwords (mode 5522).
+      const randomSecureDispatch: RandomSecureCallback = (_userdata, bufPtr, len) => {
+        const out = new Uint8Array(memory.buffer, bufPtr, len);
+        // getRandomValues refuses more than 65536 bytes per call.
+        for (let i = 0; i < len; i += 65536) {
+          crypto.getRandomValues(out.subarray(i, Math.min(len, i + 65536)));
+        }
+        return 1;
+      };
+
       const fwd = makeCallbackTrampolines({
         writePty: writePtyDispatch,
         size: sizeDispatch,
@@ -2908,6 +3022,8 @@ export class GhosttyTerminal {
         semanticPrompt: semanticPromptDispatch,
         resizeWindow: resizeWindowDispatch,
         colorScheme: colorSchemeDispatch,
+        mimeReader: mimeReaderDispatch,
+        randomSecure: randomSecureDispatch,
       });
       // Grow once per slot, write each.
       const slot = (fn: unknown): number => {
@@ -2933,6 +3049,8 @@ export class GhosttyTerminal {
         semanticPromptIndex: slot(fwd.semanticPrompt),
         resizeWindowIndex: slot(fwd.resizeWindow),
         colorSchemeIndex: slot(fwd.colorScheme),
+        mimeReaderIndex: slot(fwd.mimeReader),
+        randomSecureIndex: slot(fwd.randomSecure),
         instancesByHandle,
       };
 
@@ -2946,6 +3064,11 @@ export class GhosttyTerminal {
         registry.readShmIndex
       );
       if (result !== 0) throw new Error(`Installing Kitty shared memory failed: ${result}`);
+      const randomResult = this.exports.ghostty_sys_set(
+        SysOption.RANDOM_SECURE,
+        registry.randomSecureIndex
+      );
+      if (randomResult !== 0) throw new Error(`Installing secure random failed: ${randomResult}`);
       // Publish the capability only after the hook is installed successfully.
       globalThis.ghosttyKittySharedMemory ??= new Map<string, Uint8Array>();
       GhosttyTerminal.callbackRegistries.set(table, registry);

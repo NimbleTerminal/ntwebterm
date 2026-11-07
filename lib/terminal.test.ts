@@ -3984,7 +3984,7 @@ describe('Review regressions (Terminal & WASM)', () => {
     term.dispose();
   });
 
-  test('Terminal.paste() sanitizes bracketed paste end markers', async () => {
+  test('Terminal.paste() neutralizes bracketed paste end markers', async () => {
     const container = document.createElement('div');
     const term = await createIsolatedTerminal({ cols: 40, rows: 10 });
     await term.open(container);
@@ -3993,8 +3993,9 @@ describe('Review regressions (Terminal & WASM)', () => {
     term.onData((d) => data.push(d));
     term.write('\x1b[?2004h');
 
+    // libghostty-vt replaces the ESC with a space, so the marker cannot end the paste.
     term.paste('safe\x1b[201~evil');
-    expect(data).toEqual(['\x1b[200~safeevil\x1b[201~']);
+    expect(data).toEqual(['\x1b[200~safe [201~evil\x1b[201~']);
 
     term.dispose();
   });

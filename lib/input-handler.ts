@@ -191,6 +191,7 @@ export class InputHandler {
   private onCopyCallback?: () => boolean;
   private mouseConfig?: MouseTrackingConfig;
   private getTerminalCallback?: () => GhosttyTerminal | undefined;
+  private onPasteCallback?: (text: string) => void;
   private keydownListener: ((e: KeyboardEvent) => void) | null = null;
   private keyupListener: ((e: KeyboardEvent) => void) | null = null;
   private keypressListener: ((e: KeyboardEvent) => void) | null = null;
@@ -232,6 +233,9 @@ export class InputHandler {
    * @param onCopy - Optional callback to handle copy (Cmd+C/Ctrl+C with selection)
    * @param inputElement - Optional input element for beforeinput events
    * @param mouseConfig - Optional mouse tracking configuration
+   * @param getTerminal - Optional accessor for the WASM terminal (mouse mode queries)
+   * @param onPaste - Optional sink for pasted text; the terminal routes it through
+   *   libghostty-vt. Without it the raw text is sent to onData.
    */
   constructor(
     ghostty: Ghostty,
@@ -244,7 +248,8 @@ export class InputHandler {
     onCopy?: () => boolean,
     inputElement?: HTMLElement,
     mouseConfig?: MouseTrackingConfig,
-    getTerminal?: () => GhosttyTerminal | undefined
+    getTerminal?: () => GhosttyTerminal | undefined,
+    onPaste?: (text: string) => void
   ) {
     this.encoder = ghostty.createKeyEncoder();
     // DEC mode 1036 (alt_esc_prefix) defaults to true in Ghostty
@@ -259,6 +264,7 @@ export class InputHandler {
     this.onCopyCallback = onCopy;
     this.mouseConfig = mouseConfig;
     this.getTerminalCallback = getTerminal;
+    this.onPasteCallback = onPaste;
 
     // Attach event listeners
     this.attach();
@@ -1018,22 +1024,13 @@ export class InputHandler {
   }
 
   /**
-   * Emit paste data with bracketed paste support
+   * Route pasted text. The terminal pastes through libghostty-vt (bracketed
+   * paste framing, Kitty paste events, unsafe-byte replacement); without an
+   * onPaste callback the raw text is sent as typed input.
    */
   private emitPasteData(text: string): void {
-    const hasBracketedPaste = this.getModeCallback?.(2004) ?? false;
-
-    if (hasBracketedPaste) {
-      // Strip bracketed paste end/start markers and dangerous control chars
-      // so clipboard contents cannot prematurely terminate bracketed paste mode.
-      const sanitized = text
-        .replace(/\x1b\[20[01]~/g, '')
-        .replace(/\u009b20[01]~/g, '')
-        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u009b]/g, '');
-      this.onDataCallback('\x1b[200~' + sanitized + '\x1b[201~');
-    } else {
-      this.onDataCallback(text);
-    }
+    if (this.onPasteCallback) this.onPasteCallback(text);
+    else this.onDataCallback(text);
   }
 
   /**

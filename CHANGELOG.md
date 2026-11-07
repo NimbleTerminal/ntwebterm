@@ -8,6 +8,7 @@
 - Add `forwardNotificationsToBrowser()`, a reference implementation that shows OSC 9/777 notifications through the browser Notification API without prompting unless asked.
 - Export `writeTextToClipboard()`, the clipboard strategy shared by selection copy and OSC 52.
 - Generate the libghostty-vt ABI bindings (`lib/ghostty-abi.ts`) from upstream's frozen manifest with `bun run gen:abi`, and add drift tests that compare the generated file, the built WASM's `ghostty_type_json()` and upstream's `symbols.txt`.
+- Paste through libghostty-vt's `ghostty_terminal_paste()`: `term.paste()` and clipboard paste events now get upstream's bracketed paste framing, unsafe-byte replacement and Kitty paste events (mode 5522, when a `clipboardRead` handler is installed). New `allowUnsafePaste` option (`true` by default; `false` or a confirmation callback) applies upstream's unsafe-paste rule, and `GhosttyTerminal.paste()` exposes the call directly. `GHOSTTY_SYS_OPT_RANDOM_SECURE` is wired to `crypto.getRandomValues`.
 - Expose the loaded library's version and compile-time configuration: `term.ghosttyVersion` / `ghostty.version` bind `ghostty_version()`, and `term.ghosttyBuildInfo` / `ghostty.buildInfo` decode every `ghostty_build_info()` field into a `LibghosttyBuildInfo` (version parts, optimize mode, SIMD, feature flags).
 
 ### Changed
@@ -16,6 +17,7 @@
 - Follow the 1.0 ABI in the TypeScript bindings: renumbered option enums (`_INVALID = 0` sentinels), `ghostty_key_encoder_set*` renames, `GhosttyString`-by-value key text, the 16-byte `GhosttyStyle`, size-less callback payloads and grid references, `GhosttyCodepointBuffer` grapheme reads, and the `PIXELS`/`EXPECTED_LEN` Kitty image keys.
 - Lift the upstream scrollback byte budget with `SIZE_MAX`; a NULL value now restores the 10,000-byte default instead of removing it.
 - Drop the recycled-row clearing hunk from the patch, since upstream now zeroes recycled rows itself.
+- Pasted text follows upstream's encoding: newlines become carriage returns when bracketed paste is off (as in xterm.js), and control bytes such as ESC are replaced with spaces rather than the `\x1b[20x~` markers being stripped. The hand-written sanitizers in `Terminal.paste()` and the input handler are gone; `InputHandler` takes an `onPaste` callback and sends raw text to `onData` without one.
 - `Key`, `KeyEncoderOption` and `DirtyState` now use upstream's member names (`DIGIT_0`, `ARROW_UP`, `NUMPAD_ADD`, `BACKQUOTE`, `KITTY_FLAGS`, `FALSE`); the previous names remain as deprecated aliases. Struct offsets in the WASM bridge come from the generated `*Layout` constants instead of literals.
 
 ## 0.4.2

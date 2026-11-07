@@ -93,6 +93,8 @@ export type {
   SemanticPromptEvent,
   ProgramStatusReport,
   LibghosttyBuildInfo,
+  PasteOptions,
+  PasteResult,
   KeyEvent,
   GhosttyCell,
   RGB,

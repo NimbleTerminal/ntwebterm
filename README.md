@@ -202,6 +202,29 @@ forwardNotificationsToBrowser(term, { requestPermission: false });
 the text the host last copied. `forwardNotificationsToBrowser` never prompts
 unless `requestPermission: true` is passed, and even then it only asks once.
 
+### Paste
+
+Paste is libghostty-vt's, not ours: `term.paste()` and clipboard paste events
+call `ghostty_terminal_paste()`, which frames the text for bracketed paste
+(mode 2004), converts newlines to carriage returns when unbracketed, replaces
+control bytes such as ESC with spaces so clipboard contents can never end a
+bracketed paste early, and sends a Kitty paste event (mode 5522) instead of the
+text when the program asked for one and a `clipboardRead` handler is installed.
+
+Upstream also flags pastes that could inject commands: a line terminator
+outside bracketed paste, or the bracketed paste end marker. ntwebterm pastes
+them by default, as xterm.js does; set `allowUnsafePaste: false` to drop them or
+pass a callback to confirm with the person using the terminal:
+
+```typescript
+const term = new Terminal({
+  allowUnsafePaste: (text) => window.confirm(`Paste ${text.split('\n').length} lines?`),
+});
+```
+
+The low-level `GhosttyTerminal.paste(text, { allowUnsafe, source, location })` returns
+`'pasted'`, `'empty'` or `'rejected'` and queues the PTY bytes for `readResponse()`.
+
 ### Program status (OSC 7501)
 
 Subscribe to structured program-status reports from applications:

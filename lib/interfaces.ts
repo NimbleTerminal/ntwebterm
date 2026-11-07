@@ -50,6 +50,13 @@ export interface ITerminalOptions {
    */
   clipboardRead?: ClipboardReadHandler | null;
   /**
+   * Pastes that could inject commands: a line terminator outside bracketed
+   * paste, or the bracketed paste end marker. `true` (default) pastes them
+   * as xterm.js does, `false` drops them, and a callback may confirm with
+   * the person using the terminal and return true to paste.
+   */
+  allowUnsafePaste?: boolean | ((text: string) => boolean);
+  /**
    * Answer to CSI ? 996 n color scheme queries. 'auto' (default) derives it
    * from the luminance of theme.background.
    */

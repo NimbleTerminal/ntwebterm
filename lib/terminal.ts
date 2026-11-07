@@ -262,6 +262,7 @@ export class Terminal implements ITerminalCore {
       clipboardWrite: options.clipboardWrite ?? 'browser',
       clipboardRead: options.clipboardRead ?? null,
       colorScheme: options.colorScheme ?? 'auto',
+      allowUnsafePaste: options.allowUnsafePaste ?? true,
     };
 
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
@@ -745,7 +746,12 @@ export class Terminal implements ITerminalCore {
         },
         this.textarea!,
         mouseConfig,
-        () => this.wasmTerm
+        () => this.wasmTerm,
+        (text: string) => {
+          // Clipboard pastes go through libghostty-vt like paste().
+          this.selectionManager?.clearSelection();
+          this.paste(text);
+        }
       );
 
       // Create selection manager (pass textarea for context menu positioning)
@@ -1029,7 +1035,10 @@ export class Terminal implements ITerminalCore {
   }
 
   /**
-   * Paste text into terminal (triggers bracketed paste if supported)
+   * Paste text as if from the clipboard. libghostty-vt frames it for
+   * bracketed paste (mode 2004) or sends a Kitty paste event (mode 5522),
+   * replaces control bytes and applies the unsafe-paste rule; see the
+   * `allowUnsafePaste` option. The result is emitted through onData.
    */
   paste(data: string): void {
     this.assertOpen();
@@ -1039,20 +1048,15 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
-    this.awaitingEcho = true;
-
-    // Check if terminal has bracketed paste mode enabled
-    if (this.wasmTerm!.hasBracketedPaste()) {
-      const sanitized = data
-        .replace(/\x1b\[20[01]~/g, '')
-        .replace(/\u009b20[01]~/g, '')
-        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u009b]/g, '');
-      // Wrap with bracketed paste sequences (DEC mode 2004)
-      this.dataEmitter.fire('\x1b[200~' + sanitized + '\x1b[201~');
-    } else {
-      // Send data directly
-      this.dataEmitter.fire(data);
+    const policy = this.options.allowUnsafePaste ?? true;
+    let result = this.wasmTerm!.paste(data, { allowUnsafe: policy === true });
+    if (result === 'rejected' && typeof policy === 'function' && policy(data)) {
+      result = this.wasmTerm!.paste(data, { allowUnsafe: true });
     }
+    if (result !== 'pasted') return;
+
+    this.awaitingEcho = true;
+    this.processTerminalResponses();
   }
 
   /**

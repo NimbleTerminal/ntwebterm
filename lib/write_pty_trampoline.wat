@@ -24,6 +24,11 @@
 ;;   READ_SHM: same signature as DECODE_PNG, but input is an object name;
 ;;     only data_ptr and data_len are used in the output struct.
 ;;
+;;   MIME_READER: (userdata: i32, mime: i32, writer: i32) -> i32 (bool)
+;;     Supplies paste text to ghostty_terminal_paste() through the writer.
+;;   RANDOM_SECURE: (userdata: i32, buf: i32, len: i32) -> i32 (bool)
+;;     crypto.getRandomValues for Kitty paste event passwords.
+;;
 ;; Rebuild after edits (wasm-tools strips the names section so the bytes stay small):
 ;;   wasm-tools parse lib/write_pty_trampoline.wat | wasm-tools strip -o /tmp/trampoline.wasm
 ;; Then update the byte literal in lib/write_pty_trampoline.ts.
@@ -56,6 +61,13 @@
   (import "env" "semantic_prompt_cb" (func $semantic_prompt_cb (type $program_status_sig)))
   (import "env" "resize_window_cb" (func $resize_window_cb (type $program_status_sig)))
   (import "env" "color_scheme_cb" (func $color_scheme_cb (type $size_sig)))
+
+  ;; GhosttyMimeReaderFn for ghostty_terminal_paste(): (userdata, mime*, writer*) -> bool.
+  ;; GhosttyString and GhosttyWriter are passed by value in C, which the wasm32
+  ;; C ABI lowers to pointers to caller-owned copies.
+  (import "env" "mime_reader_cb" (func $mime_reader_cb (type $size_sig)))
+  ;; GhosttySysRandomSecureFn: (userdata, buf, len) -> bool; fills buf from a CSPRNG.
+  (import "env" "random_secure_cb" (func $random_secure_cb (type $size_sig)))
 
   (func $program_status_fwd (export "program_status_fwd") (type $program_status_sig)
     local.get 0 local.get 1 local.get 2
@@ -119,4 +131,12 @@
 
   (func $color_scheme_fwd (export "color_scheme_fwd") (type $size_sig)
     local.get 0  local.get 1  local.get 2
-    call $color_scheme_cb))
+    call $color_scheme_cb)
+
+  (func $mime_reader_fwd (export "mime_reader_fwd") (type $size_sig)
+    local.get 0  local.get 1  local.get 2
+    call $mime_reader_cb)
+
+  (func $random_secure_fwd (export "random_secure_fwd") (type $size_sig)
+    local.get 0  local.get 1  local.get 2
+    call $random_secure_cb))

@@ -1028,8 +1028,9 @@ describe('InputHandler', () => {
       expect(dataReceived[0]).toBe(pasteText);
     });
 
-    test('uses bracketed paste for beforeinput insertFromPaste', () => {
+    test('routes beforeinput insertFromPaste to onPaste', () => {
       const inputElement = createMockContainer();
+      const pasted: string[] = [];
       const handler = new InputHandler(
         ghostty,
         container as any,
@@ -1039,9 +1040,12 @@ describe('InputHandler', () => {
         },
         undefined,
         undefined,
-        (mode) => mode === 2004,
         undefined,
-        inputElement as any
+        undefined,
+        inputElement as any,
+        undefined,
+        undefined,
+        (text) => pasted.push(text)
       );
 
       const pasteText = 'Bracketed paste';
@@ -1049,8 +1053,9 @@ describe('InputHandler', () => {
 
       inputElement.dispatchEvent(beforeInputEvent);
 
-      expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0]).toBe(`\x1b[200~${pasteText}\x1b[201~`);
+      // The terminal frames it through libghostty-vt; nothing goes to onData directly.
+      expect(pasted).toEqual([pasteText]);
+      expect(dataReceived.length).toBe(0);
     });
 
     test('handles multi-line paste', () => {
@@ -1218,25 +1223,6 @@ describe('InputHandler', () => {
 
       expect(dataReceived).toEqual(['\x16']);
       expect(pasteEvent.preventDefault).toHaveBeenCalled();
-      handler.dispose();
-    });
-
-    test('sanitizes bracketed paste payload containing ESC [ 201 ~', () => {
-      const handler = new InputHandler(
-        ghostty,
-        container as any,
-        (data) => dataReceived.push(data),
-        () => {},
-        undefined,
-        undefined,
-        () => true
-      );
-
-      const pasteEvent = createClipboardEvent('ok\x1b[201~echo pwned\x9b201~');
-      container.dispatchEvent(pasteEvent);
-
-      expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0]).toBe('\x1b[200~okecho pwned\x1b[201~');
       handler.dispose();
     });
   });
