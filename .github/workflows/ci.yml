@@ -103,8 +103,10 @@ jobs:
         run: |
           SIZE=$(stat -c%s ghostty-vt.wasm)
           echo "WASM size: $SIZE bytes"
-          if [ "$SIZE" -gt 1048576 ]; then
-            echo "❌ Error: WASM exceeds 1 MiB limit"
+          # Budget: 1.25 MiB. libghostty-vt 1.0.0 (selection, formatter,
+          # search, mouse encoder) builds to ~1.03 MiB at ReleaseSmall.
+          if [ "$SIZE" -gt 1310720 ]; then
+            echo "❌ Error: WASM exceeds 1.25 MiB limit"
             exit 1
           fi
 
