@@ -1,782 +1,351 @@
 /**
  * Selection Manager Tests
  *
- * Tests for text selection functionality including:
- * - Basic selection operations
- * - Absolute coordinate system for scroll persistence
- * - Selection clearing behavior
- * - Auto-scroll during drag selection
- * - Copy functionality with scrollback
- *
- * Test Isolation Pattern:
- * Uses createIsolatedTerminal() to ensure each test gets its own WASM instance.
+ * The selection lives in libghostty-vt: the terminal owns and tracks it,
+ * the gesture state machine interprets clicks and drags, and the formatter
+ * produces the copied text. TypeScript keeps only browser plumbing and the
+ * visual-span path for drags over mixed-direction (BiDi) rows.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import type { SelectionManager } from './selection-manager';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
-/**
- * Helper to set selection using absolute coordinates
- */
-function setSelectionAbsolute(
+const manager = (term: Terminal) => (term as any).selectionManager as SelectionManager;
+
+/** Absolute row (scrollback + screen) of a viewport row. */
+function viewportToAbsolute(term: Terminal, viewportRow: number): number {
+  const scrollbackLength = term.wasmTerm?.getScrollbackLength() ?? 0;
+  return scrollbackLength + viewportRow - Math.floor(term.getViewportY());
+}
+
+/** Dispatch a mouse event inside a viewport cell, `frac` of the way across it. */
+function mouse(
   term: Terminal,
-  startCol: number,
-  startAbsRow: number,
-  endCol: number,
-  endAbsRow: number,
-  columnSpace: 'visual' | 'logical' = 'visual'
+  type: 'mousedown' | 'mousemove' | 'mouseup',
+  col: number,
+  row: number,
+  init: MouseEventInit = {},
+  frac = 0.5
 ): void {
-  const selMgr = (term as any).selectionManager;
-  if (selMgr) {
-    (selMgr as any).selectionColumnSpace = columnSpace;
-    (selMgr as any).selectionStart = { col: startCol, absoluteRow: startAbsRow };
-    (selMgr as any).selectionEnd = { col: endCol, absoluteRow: endAbsRow };
+  const renderer = (term as any).renderer;
+  const canvas = renderer.canvas as HTMLCanvasElement;
+  const m = renderer.getMetrics() as { width: number; height: number };
+  const rect = canvas.getBoundingClientRect();
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: rect.left + (col + frac) * m.width,
+    clientY: rect.top + (row + 0.5) * m.height,
+    ...init,
+  });
+  (type === 'mousedown' ? canvas : document).dispatchEvent(event);
+}
+
+/**
+ * Drag from one cell to another the way a pointer would when it means to
+ * include both: upstream's half-cell rule includes the anchor cell only if the
+ * press was on its near side, and the end cell only if the pointer passed its
+ * midpoint.
+ */
+function drag(term: Terminal, from: [number, number], to: [number, number]): void {
+  const forward = to[1] > from[1] || (to[1] === from[1] && to[0] >= from[0]);
+  mouse(term, 'mousedown', from[0], from[1], {}, forward ? 0.25 : 0.75);
+  mouse(term, 'mousemove', to[0], to[1], {}, forward ? 0.75 : 0.25);
+  mouse(term, 'mouseup', to[0], to[1], {}, forward ? 0.75 : 0.25);
+}
+
+function clicks(term: Terminal, col: number, row: number, count: number): void {
+  for (let i = 0; i < count; i++) {
+    mouse(term, 'mousedown', col, row, { detail: i + 1 });
+    mouse(term, 'mouseup', col, row, { detail: i + 1 });
   }
 }
 
-/**
- * Helper to convert viewport row to absolute row
- */
-function viewportToAbsolute(term: Terminal, viewportRow: number): number {
-  const scrollbackLength = term.wasmTerm?.getScrollbackLength() ?? 0;
-  const viewportY = term.getViewportY();
-  return scrollbackLength + viewportRow - Math.floor(viewportY);
-}
-
 describe('SelectionManager', () => {
-  let container: HTMLElement | null = null;
+  let container: HTMLElement;
+  const terminals: Terminal[] = [];
 
-  beforeEach(async () => {
-    if (typeof document !== 'undefined') {
-      container = document.createElement('div');
-      document.body.appendChild(container);
-    }
+  async function open(options: Parameters<typeof createIsolatedTerminal>[0] = {}) {
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24, ...options });
+    await term.open(container);
+    terminals.push(term);
+    // Copy-on-select must not reach the clipboard in tests.
+    (manager(term) as any).copyToClipboard = () => {};
+    return term;
+  }
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
   });
 
   afterEach(() => {
-    if (container && container.parentNode) {
-      container.parentNode.removeChild(container);
-      container = null;
-    }
+    for (const term of terminals.splice(0)) term.dispose();
+    container.remove();
   });
 
-  describe('Construction', () => {
-    test('creates without errors', async () => {
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      expect(term).toBeDefined();
-    });
-  });
-
-  describe('API', () => {
-    test('has required public methods', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      const selMgr = (term as any).selectionManager;
-      expect(typeof selMgr.getSelection).toBe('function');
-      expect(typeof selMgr.hasSelection).toBe('function');
-      expect(typeof selMgr.clearSelection).toBe('function');
-      expect(typeof selMgr.selectAll).toBe('function');
-      expect(typeof selMgr.getSelectionCoords).toBe('function');
-      expect(typeof selMgr.dispose).toBe('function');
-      expect(typeof selMgr.getDirtySelectionRows).toBe('function');
-      expect(typeof selMgr.clearDirtySelectionRows).toBe('function');
-
-      term.dispose();
-    });
-  });
-
-  describe('Selection with absolute coordinates', () => {
-    test('hasSelection returns false when no selection', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.hasSelection()).toBe(false);
-
-      term.dispose();
+  describe('programmatic selection', () => {
+    test('starts without a selection', async () => {
+      const term = await open();
+      expect(manager(term).hasSelection()).toBe(false);
+      expect(manager(term).getSelection()).toBe('');
+      expect(manager(term).getSelectionCoords()).toBeNull();
     });
 
-    test('hasSelection returns true when selection exists', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
+    test('selectAbsolute selects logical cells and reads back through the formatter', async () => {
+      const term = await open();
       term.write('Hello World\r\n');
-
-      // Set selection using absolute coordinates
-      setSelectionAbsolute(term, 0, 0, 5, 0);
-
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.hasSelection()).toBe(true);
-
-      term.dispose();
+      const row = viewportToAbsolute(term, 0);
+      manager(term).selectAbsolute(0, row, 4, row);
+      expect(manager(term).hasSelection()).toBe(true);
+      expect(manager(term).getSelection()).toBe('Hello');
+      expect(manager(term).getSelectionColumnSpace()).toBe('logical');
     });
 
-    test('hasSelection returns true for single cell programmatic selection', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      // Programmatic single-cell selection should be valid
-      // (e.g., triple-click on single-char line, or select(col, row, 1))
-      setSelectionAbsolute(term, 5, 0, 5, 0);
-
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.hasSelection()).toBe(true);
-
-      term.dispose();
+    test('a single-cell selection counts as a selection', async () => {
+      const term = await open();
+      term.write('Hello');
+      manager(term).selectAbsolute(1, 0, 1, 0);
+      expect(manager(term).hasSelection()).toBe(true);
+      expect(manager(term).getSelection()).toBe('e');
     });
 
-    test('clearSelection clears selection and marks rows dirty', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
+    test('multi-line text joins rows with newlines', async () => {
+      const term = await open();
       term.write('Line 1\r\nLine 2\r\nLine 3\r\n');
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      setSelectionAbsolute(term, 0, scrollbackLen, 5, scrollbackLen + 2);
-
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.hasSelection()).toBe(true);
-
-      selMgr.clearSelection();
-
-      expect(selMgr.hasSelection()).toBe(false);
-      // Dirty rows should be marked for redraw
-      const dirtyRows = selMgr.getDirtySelectionRows();
-      expect(dirtyRows.size).toBeGreaterThan(0);
-
-      term.dispose();
-    });
-  });
-
-  describe('Selection text extraction', () => {
-    test('getSelection returns empty string when no selection', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.getSelection()).toBe('');
-
-      term.dispose();
+      const row = viewportToAbsolute(term, 0);
+      manager(term).selectAbsolute(0, row, 5, row + 2);
+      expect(manager(term).getSelection()).toBe('Line 1\nLine 2\nLine 3');
     });
 
-    test('getSelection extracts text from screen buffer', async () => {
-      if (!container) return;
+    test('backward selections read forward', async () => {
+      const term = await open();
+      term.write('Hello World\r\nLine 2\r\nLine 3');
+      manager(term).selectAbsolute(10, 0, 0, 0);
+      expect(manager(term).getSelection()).toBe('Hello World');
+      manager(term).selectAbsolute(5, 2, 0, 0);
+      expect(manager(term).getSelection()).toBe('Hello World\nLine 2\nLine 3');
+    });
 
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
+    test('select() uses viewport rows and logical columns, wrapping long lengths', async () => {
+      const term = await open();
       term.write('Hello World\r\n');
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      // Select "Hello" (first 5 characters)
-      setSelectionAbsolute(term, 0, scrollbackLen, 4, scrollbackLen);
-
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.getSelection()).toBe('Hello');
-
-      term.dispose();
-    });
-
-    test('getSelection extracts multi-line text', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Line 1\r\nLine 2\r\nLine 3\r\n');
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      // Select all three lines
-      setSelectionAbsolute(term, 0, scrollbackLen, 5, scrollbackLen + 2);
-
-      const selMgr = (term as any).selectionManager;
-      const text = selMgr.getSelection();
-
-      expect(text).toContain('Line 1');
-      expect(text).toContain('Line 2');
-      expect(text).toContain('Line 3');
-
-      term.dispose();
-    });
-
-    test('getSelection extracts text from scrollback', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
-      await term.open(container);
-
-      // Write enough lines to create scrollback
-      for (let i = 0; i < 50; i++) {
-        term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
-      }
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      expect(scrollbackLen).toBeGreaterThan(0);
-
-      // Select from scrollback (first few lines)
-      setSelectionAbsolute(term, 0, 0, 10, 2);
-
-      const selMgr = (term as any).selectionManager;
-      const text = selMgr.getSelection();
-
-      expect(text).toContain('Line 000');
-      expect(text).toContain('Line 001');
-      expect(text).toContain('Line 002');
-
-      term.dispose();
-    });
-
-    test('getSelection extracts text spanning scrollback and screen', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
-      await term.open(container);
-
-      // Write enough lines to fill scrollback and screen
-      for (let i = 0; i < 50; i++) {
-        term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
-      }
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-
-      // Select spanning scrollback and screen
-      // End of scrollback through beginning of screen
-      setSelectionAbsolute(term, 0, scrollbackLen - 2, 10, scrollbackLen + 2);
-
-      const selMgr = (term as any).selectionManager;
-      const text = selMgr.getSelection();
-
-      // Should contain lines from both regions
-      expect(text.split('\n').length).toBeGreaterThanOrEqual(4);
-
-      term.dispose();
-    });
-  });
-
-  describe('Selection persistence during scroll', () => {
-    test('selection coordinates are preserved when scrolling', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
-      await term.open(container);
-
-      // Write content
-      for (let i = 0; i < 50; i++) {
-        term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
-      }
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-
-      // Set selection at specific absolute position
-      const startAbsRow = scrollbackLen + 5;
-      const endAbsRow = scrollbackLen + 10;
-      setSelectionAbsolute(term, 0, startAbsRow, 10, endAbsRow);
-
-      const selMgr = (term as any).selectionManager;
-      const textBefore = selMgr.getSelection();
-
-      // Scroll up
-      term.scrollLines(-10);
-
-      // Selection should still return the same text
-      const textAfter = selMgr.getSelection();
-      expect(textAfter).toBe(textBefore);
-
-      term.dispose();
-    });
-
-    test('selection coords convert correctly after scrolling', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
-      await term.open(container);
-
-      // Write content
-      for (let i = 0; i < 50; i++) {
-        term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
-      }
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-
-      // Set selection in screen buffer area
-      setSelectionAbsolute(term, 0, scrollbackLen, 10, scrollbackLen + 5);
-
-      const selMgr = (term as any).selectionManager;
-
-      // Get viewport coords before scroll
-      const coordsBefore = selMgr.getSelectionCoords();
-      expect(coordsBefore).not.toBeNull();
-
-      // Scroll up 10 lines
-      term.scrollLines(-10);
-
-      // Get viewport coords after scroll - they should have shifted
-      const coordsAfter = selMgr.getSelectionCoords();
-      expect(coordsAfter).not.toBeNull();
-
-      // Viewport row should have increased by the scroll amount
-      expect(coordsAfter!.startRow).toBe(coordsBefore!.startRow + 10);
-      expect(coordsAfter!.endRow).toBe(coordsBefore!.endRow + 10);
-
-      term.dispose();
-    });
-
-    test('selection outside viewport returns null coords but preserves text', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
-      await term.open(container);
-
-      // Write content
-      for (let i = 0; i < 100; i++) {
-        term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
-      }
-
-      // Select near the bottom of the buffer
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      setSelectionAbsolute(term, 0, scrollbackLen + 10, 10, scrollbackLen + 15);
-
-      const selMgr = (term as any).selectionManager;
-      const text = selMgr.getSelection();
-
-      // Scroll to top - selection should be way off screen
-      term.scrollToTop();
-
-      // Coords should be null (off screen) but text should still work
-      const coords = selMgr.getSelectionCoords();
-      expect(coords).toBeNull();
-
-      // Text extraction should still work
-      expect(selMgr.getSelection()).toBe(text);
-
-      term.dispose();
-    });
-  });
-
-  describe('Dirty row tracking', () => {
-    test('getDirtySelectionRows returns empty set initially', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.getDirtySelectionRows().size).toBe(0);
-
-      term.dispose();
-    });
-
-    test('clearSelection marks selection rows as dirty', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Test content\r\n');
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      setSelectionAbsolute(term, 0, scrollbackLen, 5, scrollbackLen + 3);
-
-      const selMgr = (term as any).selectionManager;
-      selMgr.clearSelection();
-
-      const dirtyRows = selMgr.getDirtySelectionRows();
-      expect(dirtyRows.size).toBeGreaterThan(0);
-
-      term.dispose();
-    });
-
-    test('clearDirtySelectionRows clears the set', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Test\r\n');
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      setSelectionAbsolute(term, 0, scrollbackLen, 5, scrollbackLen);
-
-      const selMgr = (term as any).selectionManager;
-      selMgr.clearSelection();
-
-      expect(selMgr.getDirtySelectionRows().size).toBeGreaterThan(0);
-
-      selMgr.clearDirtySelectionRows();
-
-      expect(selMgr.getDirtySelectionRows().size).toBe(0);
-
-      term.dispose();
-    });
-  });
-
-  describe('Backward selection', () => {
-    test('handles selection from right to left', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Hello World\r\n');
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      // Select backwards (end before start)
-      setSelectionAbsolute(term, 10, scrollbackLen, 0, scrollbackLen);
-
-      const selMgr = (term as any).selectionManager;
-      const text = selMgr.getSelection();
-
-      expect(text).toBe('Hello World');
-
-      term.dispose();
-    });
-
-    test('handles selection from bottom to top', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Line 1\r\nLine 2\r\nLine 3\r\n');
-
-      const scrollbackLen = term.wasmTerm!.getScrollbackLength();
-      // Select backwards (end row before start row)
-      setSelectionAbsolute(term, 5, scrollbackLen + 2, 0, scrollbackLen);
-
-      const selMgr = (term as any).selectionManager;
-      const text = selMgr.getSelection();
-
-      expect(text).toContain('Line 1');
-      expect(text).toContain('Line 2');
-      expect(text).toContain('Line 3');
-
-      term.dispose();
-    });
-  });
-
-  describe('selectAll', () => {
-    test('selectAll selects entire viewport', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Hello\r\nWorld\r\n');
-
-      const selMgr = (term as any).selectionManager;
-      selMgr.selectAll();
-
-      expect(selMgr.hasSelection()).toBe(true);
-
-      const coords = selMgr.getSelectionCoords();
-      expect(coords).not.toBeNull();
-      expect(coords!.startRow).toBe(0);
-      expect(coords!.startCol).toBe(0);
-      expect(coords!.endRow).toBe(23); // rows - 1
-
-      term.dispose();
-    });
-  });
-
-  describe('select() API', () => {
-    test('select() creates selection at specified position', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Hello World\r\n');
-
-      const selMgr = (term as any).selectionManager;
-      selMgr.select(0, 0, 5);
-
-      expect(selMgr.hasSelection()).toBe(true);
-      expect(selMgr.getSelection()).toBe('Hello');
-
-      term.dispose();
+      manager(term).select(0, 0, 5);
+      expect(manager(term).getSelection()).toBe('Hello');
+      expect(manager(term).getSelectionPosition()).toEqual({
+        start: { x: 0, y: 0 },
+        end: { x: 4, y: 0 },
+      });
     });
 
     test('select() treats columns as logical buffer coordinates on a BiDi row', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
+      const term = await open();
       term.write('אבג'); // visual: ג ב א
-
-      const selMgr = (term as any).selectionManager;
-      selMgr.select(0, 0, 1);
-
-      expect(selMgr.getSelection()).toBe('א');
-      expect(selMgr.getSelectionPosition()).toEqual({
+      manager(term).select(0, 0, 1);
+      expect(manager(term).getSelection()).toBe('א');
+      expect(manager(term).getSelectionPosition()).toEqual({
         start: { x: 0, y: 0 },
         end: { x: 0, y: 0 },
       });
-      expect(selMgr.getSelectionColumnSpace()).toBe('logical');
-
-      term.dispose();
+      expect(manager(term).getSelectionColumnSpace()).toBe('logical');
     });
-  });
 
-  describe('selectLines() API', () => {
-    test('selectLines() selects entire lines', async () => {
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
+    test('selectLines() selects whole lines', async () => {
+      const term = await open();
       term.write('Line 1\r\nLine 2\r\nLine 3\r\n');
+      manager(term).selectLines(0, 1);
+      expect(manager(term).getSelection()).toBe('Line 1\nLine 2');
+    });
 
-      const selMgr = (term as any).selectionManager;
-      selMgr.selectLines(0, 1);
+    test('selectAll() covers scrollback and screen', async () => {
+      const term = await open({ cols: 20, rows: 3, scrollback: 50 });
+      term.write('é-scroll\r\nRow2\r\nRow3\r\nRow4');
+      term.selectAll();
+      expect(term.getSelection()).toBe('é-scroll\nRow2\nRow3\nRow4');
+      const coords = manager(term).getSelectionCoords()!;
+      expect(coords.startRow).toBe(0); // clamped to the top of the viewport
+      expect(coords.endRow).toBe(2);
+    });
 
-      expect(selMgr.hasSelection()).toBe(true);
-
-      const text = selMgr.getSelection();
-      expect(text).toContain('Line 1');
-      expect(text).toContain('Line 2');
-
-      term.dispose();
+    test('clearSelection() marks the rows dirty and fires no change event', async () => {
+      const term = await open();
+      term.write('Line 1\r\nLine 2\r\nLine 3\r\n');
+      const row = viewportToAbsolute(term, 0);
+      manager(term).selectAbsolute(0, row, 5, row + 2);
+      // Selecting marks the rows for repaint too; start from a clean slate.
+      manager(term).clearDirtySelectionRows();
+      manager(term).clearSelection();
+      expect(manager(term).hasSelection()).toBe(false);
+      expect([...manager(term).getDirtySelectionRows()].sort()).toEqual([0, 1, 2]);
+      manager(term).clearDirtySelectionRows();
+      expect(manager(term).getDirtySelectionRows().size).toBe(0);
     });
   });
 
-  describe('scrollback content accuracy', () => {
-    test('getScrollbackLine returns correct content after lines scroll off', async () => {
-      const container = document.createElement('div');
-      Object.defineProperty(container, 'clientWidth', { value: 800 });
-      Object.defineProperty(container, 'clientHeight', { value: 480 });
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      // Write 50 lines to push content into scrollback (terminal has 24 rows)
-      for (let i = 0; i < 50; i++) {
-        term.write(`Line ${i}\r\n`);
-      }
-
-      const wasmTerm = (term as any).wasmTerm;
-      const scrollbackLen = wasmTerm.getScrollbackLength();
-      expect(scrollbackLen).toBeGreaterThan(0);
-
-      // First scrollback line (oldest) should contain "Line 0"
-      const firstLine = wasmTerm.getScrollbackLine(0);
-      expect(firstLine).not.toBeNull();
-      const firstText = firstLine!
-        .map((c: any) => (c.codepoint ? String.fromCodePoint(c.codepoint) : ''))
-        .join('')
-        .trim();
-      expect(firstText).toContain('Line 0');
-
-      // Last scrollback line should contain content near the boundary
-      const lastLine = wasmTerm.getScrollbackLine(scrollbackLen - 1);
-      expect(lastLine).not.toBeNull();
-      const lastText = lastLine!
-        .map((c: any) => (c.codepoint ? String.fromCodePoint(c.codepoint) : ''))
-        .join('')
-        .trim();
-      // The last scrollback line is the one just above the visible viewport
-      expect(lastText).toMatch(/Line \d+/);
-
-      term.dispose();
+  describe('selection follows content', () => {
+    test('text and coordinates survive scrolling the viewport', async () => {
+      const term = await open({ scrollback: 1000 });
+      for (let i = 0; i < 50; i++) term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
+      const base = term.wasmTerm!.getScrollbackLength();
+      manager(term).selectAbsolute(0, base + 5, 10, base + 10);
+      const before = manager(term).getSelectionCoords()!;
+      const text = manager(term).getSelection();
+      term.scrollLines(-10);
+      expect(manager(term).getSelection()).toBe(text);
+      const after = manager(term).getSelectionCoords()!;
+      expect(after.startRow).toBe(before.startRow + 10);
+      expect(after.endRow).toBe(before.endRow + 10);
     });
 
-    test('selection clears when user types', async () => {
-      const container = document.createElement('div');
-      Object.defineProperty(container, 'clientWidth', { value: 800 });
-      Object.defineProperty(container, 'clientHeight', { value: 480 });
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      term.write('Hello World\r\n');
-
-      const selMgr = (term as any).selectionManager;
-      selMgr.selectLines(0, 0);
-      expect(selMgr.hasSelection()).toBe(true);
-
-      // Simulate the input callback clearing selection
-      // The actual input handler calls clearSelection before firing data
-      selMgr.clearSelection();
-      expect(selMgr.hasSelection()).toBe(false);
-
-      term.dispose();
+    test('a selection scrolled out of view has no coordinates but keeps its text', async () => {
+      const term = await open({ scrollback: 1000 });
+      for (let i = 0; i < 100; i++) term.write(`Line ${i.toString().padStart(3, '0')}\r\n`);
+      const base = term.wasmTerm!.getScrollbackLength();
+      manager(term).selectAbsolute(0, base + 10, 10, base + 15);
+      const text = manager(term).getSelection();
+      term.scrollToTop();
+      expect(manager(term).getSelectionCoords()).toBeNull();
+      expect(manager(term).getSelection()).toBe(text);
     });
 
-    test('triple-click selects correct line in scrollback region', async () => {
-      const container = document.createElement('div');
-      Object.defineProperty(container, 'clientWidth', { value: 800 });
-      Object.defineProperty(container, 'clientHeight', { value: 480 });
-      if (!container) return;
-
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-
-      // Write enough lines to create scrollback
-      for (let i = 0; i < 50; i++) {
-        term.write(`TestLine${i}\r\n`);
-      }
-
-      const wasmTerm = (term as any).wasmTerm;
-      const scrollbackLen = wasmTerm.getScrollbackLength();
-      expect(scrollbackLen).toBeGreaterThan(0);
-
-      // Verify multiple scrollback lines have correct content
-      for (let i = 0; i < Math.min(5, scrollbackLen); i++) {
-        const line = wasmTerm.getScrollbackLine(i);
-        expect(line).not.toBeNull();
-        const text = line!
-          .map((c: any) => (c.codepoint ? String.fromCodePoint(c.codepoint) : ''))
-          .join('')
-          .trim();
-        expect(text).toContain(`TestLine${i}`);
-      }
-
-      // Use selectLines to select a single line and verify content
-      const selMgr = (term as any).selectionManager;
-      selMgr.selectLines(0, 0);
-      expect(selMgr.hasSelection()).toBe(true);
-      const selectedText = selMgr.getSelection();
-      expect(selectedText.length).toBeGreaterThan(0);
-
-      term.dispose();
+    test('the terminal tracks the selection when new output scrolls the screen', async () => {
+      const term = await open({ cols: 20, rows: 3, scrollback: 50 });
+      term.write('first\r\nsecond\r\nthird');
+      manager(term).selectAbsolute(0, 1, 5, 1);
+      expect(manager(term).getSelection()).toBe('second');
+      term.write('\r\nfourth\r\nfifth');
+      // "second" is in scrollback now; the selection moved with it.
+      expect(manager(term).getSelection()).toBe('second');
+      expect(manager(term).getSelectionCoords()).toBeNull();
     });
   });
 
-  describe('BiDi selection', () => {
+  describe('mouse gestures', () => {
+    test('a plain click selects nothing', async () => {
+      const term = await open();
+      term.write('Hello World');
+      clicks(term, 2, 0, 1);
+      expect(manager(term).hasSelection()).toBe(false);
+    });
+
+    test('dragging selects the swept cells and fires onSelectionChange on release', async () => {
+      const term = await open();
+      term.write('Hello World');
+      let changes = 0;
+      term.onSelectionChange(() => changes++);
+      drag(term, [0, 0], [4, 0]);
+      expect(manager(term).getSelection()).toBe('Hello');
+      expect(changes).toBe(1);
+    });
+
+    test('a click after a drag clears the selection', async () => {
+      const term = await open();
+      term.write('Hello World');
+      drag(term, [0, 0], [4, 0]);
+      expect(manager(term).hasSelection()).toBe(true);
+      // Wait out the repeat interval so this does not count as a double click.
+      await new Promise((r) => setTimeout(r, 600));
+      clicks(term, 20, 5, 1);
+      expect(manager(term).hasSelection()).toBe(false);
+    });
+
+    test('double click selects a word by upstream boundaries, triple click the line', async () => {
+      const term = await open();
+      term.write('foo bar:baz qux\r\n');
+      clicks(term, 5, 0, 2);
+      expect(manager(term).getSelection()).toBe('bar');
+      await new Promise((r) => setTimeout(r, 600));
+      clicks(term, 5, 0, 3);
+      expect(manager(term).getSelection()).toBe('foo bar:baz qux');
+    });
+
+    test('double-click drag extends word by word', async () => {
+      const term = await open();
+      term.write('alpha beta gamma delta');
+      mouse(term, 'mousedown', 1, 0, { detail: 1 });
+      mouse(term, 'mouseup', 1, 0, { detail: 1 });
+      mouse(term, 'mousedown', 1, 0, { detail: 2 });
+      mouse(term, 'mousemove', 12, 0); // inside "gamma"
+      mouse(term, 'mouseup', 12, 0);
+      expect(manager(term).getSelection()).toBe('alpha beta gamma');
+    });
+
+    test('dragging upward reads forward', async () => {
+      const term = await open();
+      term.write('one\r\ntwo\r\nthree');
+      drag(term, [2, 2], [0, 0]);
+      expect(manager(term).getSelection()).toBe('one\ntwo\nthr');
+    });
+  });
+
+  describe('BiDi', () => {
     test('full-row selection over Hebrew copies logical order', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
+      const term = await open();
       term.write('אבג');
-      setSelectionAbsolute(term, 0, 0, 2, 0);
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.getSelection()).toBe('אבג');
-      term.dispose();
+      manager(term).selectAbsolute(0, 0, 2, 0);
+      expect(manager(term).getSelection()).toBe('אבג');
     });
 
-    test('partial visual selection maps to the correct logical cells', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
-      term.write('אבג'); // visual: ג ב א — visual cols 0..1 are ג ב = logical 1..2
-      setSelectionAbsolute(term, 0, 0, 1, 0);
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.getSelection()).toBe('בג');
-      term.dispose();
-    });
-
-    test('visual selection across an LTR/RTL boundary yields disjoint logical ranges in logical order', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
+    test('a drag over a mixed-direction row selects the visually swept cells', async () => {
+      const term = await open();
       term.write('ab אבג cd');
       // logical: a b ␠ א ב ג ␠ c d ; visual: a b ␠ ג ב א ␠ c d
-      // visual cols 2..4 hold logical {2, 5, 4}; sorted ascending = [2, 4, 5]
-      // = '␠', 'ב', 'ג' → clipboard carries ' בג'
-      setSelectionAbsolute(term, 2, 0, 4, 0);
-      const selMgr = (term as any).selectionManager;
-      expect(selMgr.getSelection()).toBe(' בג');
-      term.dispose();
+      // visual cols 2..4 hold logical {2, 5, 4}; in logical order that is ' בג'.
+      drag(term, [2, 0], [4, 0]);
+      expect(manager(term).getSelectionColumnSpace()).toBe('visual');
+      expect(manager(term).getSelection()).toBe(' בג');
+      expect(manager(term).getSelectionCoords()).toMatchObject({ startCol: 2, endCol: 4 });
+    });
+
+    test('a partial drag over a pure RTL row maps to the right logical cells', async () => {
+      const term = await open();
+      term.write('אבג'); // visual: ג ב א
+      drag(term, [0, 0], [1, 0]);
+      expect(manager(term).getSelection()).toBe('בג');
+    });
+
+    test('a drag over plain rows stays logical even when a BiDi row exists elsewhere', async () => {
+      const term = await open();
+      term.write('אבג\r\nhello world');
+      drag(term, [0, 1], [4, 1]);
+      expect(manager(term).getSelectionColumnSpace()).toBe('logical');
+      expect(manager(term).getSelection()).toBe('hello');
     });
 
     test('double-click word selection works on a Hebrew word', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
+      const term = await open();
       term.write('שלום עולם');
-      const selMgr = (term as any).selectionManager;
-      // The row is a single homogeneous RTL run (base direction is fixed
-      // LTR, but two Hebrew words separated by a neutral space still form
-      // one level-1 run), so the UBA reverses the whole row as a block:
-      // visual cols 0..3 hold the SECOND logical word (עולם, logical cols
-      // 5..8); visual cols 5..8 hold the first word (שלום, logical cols
-      // 0..3). Click at visual col 1, which lands inside עולם.
-      const word = (selMgr as any).getWordAtCell(1, 0);
-      expect(word).toEqual({ startCol: 5, endCol: 8 });
-      setSelectionAbsolute(term, word.startCol, 0, word.endCol, 0, 'logical');
-      expect(selMgr.getSelection()).toBe('עולם');
-      term.dispose();
+      // Visual cols 0..3 show the second word עולם (logical 5..8).
+      clicks(term, 1, 0, 2);
+      expect(manager(term).getSelection()).toBe('עולם');
+      expect(manager(term).getSelectionColumnSpace()).toBe('logical');
     });
 
     test('double-click keeps a mixed-direction word as an exact logical range', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
-      await term.open(container);
+      const term = await open();
       term.write('א:אa');
-      const selMgr = (term as any).selectionManager;
-
-      // The logical word אa occupies visual columns 3 and 0. Collapsing
-      // those positions to visual min..max would also select the unrelated א:.
-      const word = (selMgr as any).getWordAtCell(0, 0);
-      expect(word).toEqual({ startCol: 2, endCol: 3 });
-
-      // Exercise the actual double-click handler, not just the word finder.
-      (selMgr as any).copyToClipboard = () => {};
-      const canvas = (term as any).renderer.canvas as HTMLCanvasElement;
-      const doubleClick = new MouseEvent('click', {
-        bubbles: true,
-        detail: 2,
-        clientX: 1,
-        clientY: 1,
-      });
-      Object.defineProperty(doubleClick, 'offsetX', { value: 1 });
-      Object.defineProperty(doubleClick, 'offsetY', { value: 1 });
-      canvas.dispatchEvent(doubleClick);
-
-      expect(selMgr.getSelection()).toBe('אa');
-      expect(selMgr.getSelection()).not.toContain(':');
-      expect(selMgr.getSelectionColumnSpace()).toBe('logical');
-      term.dispose();
+      // The logical word אa occupies visual columns 3 and 0.
+      clicks(term, 0, 0, 2);
+      expect(manager(term).getSelection()).toBe('אa');
     });
   });
 
-  describe('Wide characters, soft-wrap, and scrollback graphemes', () => {
-    test('wide CJK characters do not copy extra spaces for width-0 spacer cells', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 20, rows: 5 });
-      await term.open(container);
+  describe('wide characters and wrapping', () => {
+    test('wide CJK characters do not copy extra spaces for spacer cells', async () => {
+      const term = await open({ cols: 20, rows: 5 });
       term.write('中文测试');
       term.select(0, 0, 8);
       expect(term.getSelection()).toBe('中文测试');
-      term.dispose();
     });
 
-    test('soft-wrapped lines omit newline while hard-wrapped lines include newline', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 10, rows: 3 });
-      await term.open(container);
+    test('soft-wrapped lines join while hard-wrapped lines keep their newline', async () => {
+      const term = await open({ cols: 10, rows: 3 });
       term.write('0123456789ABCDEF\r\nSecond');
       term.selectAll();
       expect(term.getSelection()).toBe('0123456789ABCDEF\nSecond');
-      term.dispose();
-    });
-
-    test('selectAll() and scrollback grapheme selection include scrollback lines and combining marks', async () => {
-      if (!container) return;
-      const term = await createIsolatedTerminal({ cols: 20, rows: 3, scrollback: 50 });
-      await term.open(container);
-      term.write('e\u0301-scroll\r\nRow2\r\nRow3\r\nRow4');
-      term.selectAll();
-      const all = term.getSelection();
-      expect(all).toContain('e\u0301-scroll');
-      expect(all).toContain('Row4');
-      term.dispose();
     });
   });
 });

@@ -242,6 +242,32 @@ horizontally.
 `GhosttyTerminal.encodeMouse(report)` exposes the encoder for custom input
 pipelines; `MouseEncoder` is the raw binding.
 
+### Selection
+
+The selection is libghostty-vt's. The terminal owns it and tracks it across
+output, scrolling and resizes (`GHOSTTY_TERMINAL_OPT_SELECTION`); upstream's
+gesture state machine (`ghostty_selection_gesture_*`) turns presses and drags
+into selections, deciding click counts, the within-cell drag threshold, word
+and line behavior for double and triple clicks, word-by-word double-click
+drags and when to autoscroll; `ghostty_terminal_select_word/line/all/output`
+give Ghostty's own rules for what those select; and the copied text comes from
+the formatter with the same unwrap-and-trim defaults Ghostty puts on the
+clipboard. `term.select()`, `selectLines()`, `selectAll()` and `getSelection()`
+keep their xterm.js shapes on top of this.
+
+TypeScript keeps the browser side: pointer-to-cell hit-testing with the
+renderer's fractional cell metrics, the autoscroll timer (ntwebterm scrolls its
+own viewport rather than the WASM one), copy-on-select, the context-menu
+textarea, and one shape upstream cannot express: dragging over a
+mixed-direction (BiDi) row selects the visually swept cells, which may be several
+logical ranges. Each range is still formatted by libghostty.
+
+`GhosttyTerminal` exposes the primitives for custom integrations: `gridRef()`,
+`getSelection()`/`setSelection()`, `selectWord()`, `selectLine()`,
+`selectAll()`, `selectOutput()`, `selectionOrdered()`, `formatSelection()`,
+`getRowSelection()` and the `gesturePress()`/`gestureDrag()`/`gestureRelease()`
+family.
+
 ### Program status (OSC 7501)
 
 Subscribe to structured program-status reports from applications:

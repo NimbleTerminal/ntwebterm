@@ -80,7 +80,18 @@ export {
   DirtyState,
   KeyEncoderOption,
 } from './ghostty';
-export { Key, KeyAction, Mods, MouseAction, MouseButton } from './types';
+export {
+  Key,
+  KeyAction,
+  Mods,
+  MouseAction,
+  MouseButton,
+  PointTag,
+  SelectionAdjust,
+  SelectionGestureAutoscroll,
+  SelectionGestureBehavior,
+  SelectionOrder,
+} from './types';
 export type {
   ClipboardContent,
   ClipboardLocation,
@@ -95,6 +106,12 @@ export type {
   ProgramStatusReport,
   LibghosttyBuildInfo,
   MouseReport,
+  GridRef,
+  TerminalSelection,
+  RowSelection,
+  FormatOptions,
+  SelectionGestureGeometry,
+  SelectionGestureState,
   PasteOptions,
   PasteResult,
   KeyEvent,

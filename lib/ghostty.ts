@@ -39,12 +39,18 @@ import {
   GhosttyPointValueLayout,
   GhosttyRenderStateRowSelectionLayout,
   GhosttyResult,
+  GhosttySelectionGestureBehaviorsLayout,
+  GhosttySelectionGestureData,
+  GhosttySelectionGestureEventOption,
+  GhosttySelectionGestureEventType,
+  GhosttySelectionGestureGeometryLayout,
   GhosttySelectionLayout,
   GhosttySizeReportSizeLayout,
   GhosttyStringLayout,
   GhosttyStyleColorLayout,
   GhosttyStyleColorTag,
   GhosttyStyleLayout,
+  GhosttySurfacePositionLayout,
   GhosttySysImageLayout,
   GhosttyTerminalDesktopNotificationLayout,
   GhosttyTerminalModeConfigLayout,
@@ -107,6 +113,10 @@ import {
   RowData,
   type RowSelection,
   type SelectionAdjust,
+  type SelectionGestureAutoscroll,
+  type SelectionGestureBehavior,
+  type SelectionGestureGeometry,
+  type SelectionGestureState,
   SelectionOrder,
   type SemanticPromptEvent,
   StyleFlag,
@@ -734,6 +744,10 @@ export class GhosttyTerminal {
 
   /** Lazily created GhosttyFormatter for formatSelection(). */
   private formatter = 0;
+
+  /** Lazily created GhosttySelectionGesture and one reusable event per type. */
+  private gesture = 0;
+  private gestureEvents = new Map<GhosttySelectionGestureEventType, number>();
 
   /**
    * Bytes the terminal would have written back to a real PTY in response
@@ -1756,6 +1770,14 @@ export class GhosttyTerminal {
     if (this.formatter) {
       this.exports.ghostty_formatter_free(this.formatter);
       this.formatter = 0;
+    }
+    for (const event of this.gestureEvents.values()) {
+      this.exports.ghostty_selection_gesture_event_free(event);
+    }
+    this.gestureEvents.clear();
+    if (this.gesture) {
+      this.exports.ghostty_selection_gesture_free(this.gesture, this.handle);
+      this.gesture = 0;
     }
     this.exports.ghostty_terminal_free(this.handle);
   }
@@ -2927,6 +2949,222 @@ export class GhosttyTerminal {
       }
     } finally {
       this.exports.ghostty_wasm_free(outPtrPtr, 8);
+    }
+  }
+
+  // ==========================================================================
+  // Selection gestures: upstream's state machine for click counts, drags and
+  // what each click selects. One gesture per terminal, one pointer stream.
+  // ==========================================================================
+
+  private gestureHandle(): number {
+    if (!this.gesture) {
+      const ptrPtr = this.exports.ghostty_wasm_alloc_opaque();
+      try {
+        const r = this.exports.ghostty_selection_gesture_new(0, ptrPtr);
+        if (r !== GhosttyResult.SUCCESS) {
+          throw new Error(`ghostty_selection_gesture_new failed: ${GhosttyResult[r] ?? r}`);
+        }
+        this.gesture = new DataView(this.memory.buffer).getUint32(ptrPtr, true);
+      } finally {
+        this.exports.ghostty_wasm_free_opaque(ptrPtr);
+      }
+    }
+    return this.gesture;
+  }
+
+  private gestureEvent(type: GhosttySelectionGestureEventType): number {
+    let event = this.gestureEvents.get(type);
+    if (event === undefined) {
+      const ptrPtr = this.exports.ghostty_wasm_alloc_opaque();
+      try {
+        const r = this.exports.ghostty_selection_gesture_event_new(0, ptrPtr, type);
+        if (r !== GhosttyResult.SUCCESS) {
+          throw new Error(`ghostty_selection_gesture_event_new failed: ${GhosttyResult[r] ?? r}`);
+        }
+        event = new DataView(this.memory.buffer).getUint32(ptrPtr, true);
+      } finally {
+        this.exports.ghostty_wasm_free_opaque(ptrPtr);
+      }
+      this.gestureEvents.set(type, event);
+    }
+    return event;
+  }
+
+  /** Set an event option from scratch memory `write` fills, or clear it with size 0. */
+  private gestureSet(
+    event: number,
+    option: GhosttySelectionGestureEventOption,
+    size: number,
+    write?: (view: DataView, ptr: number) => void
+  ): void {
+    const ptr = size > 0 ? this.exports.ghostty_wasm_alloc(size) : 0;
+    try {
+      if (ptr) {
+        new Uint8Array(this.memory.buffer, ptr, size).fill(0);
+        write?.(new DataView(this.memory.buffer), ptr);
+      }
+      const r = this.exports.ghostty_selection_gesture_event_set(event, option, ptr);
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(
+          `ghostty_selection_gesture_event_set(${GhosttySelectionGestureEventOption[option]}) failed: ${GhosttyResult[r] ?? r}`
+        );
+      }
+    } finally {
+      if (ptr) this.exports.ghostty_wasm_free(ptr, size);
+    }
+  }
+
+  private gestureSetRef(event: number, ref: GridRef | null): void {
+    const L = GhosttyGridRefLayout;
+    if (ref === null) this.gestureSet(event, GhosttySelectionGestureEventOption.REF, 0);
+    else
+      this.gestureSet(event, GhosttySelectionGestureEventOption.REF, L.size, (_v, p) =>
+        this.writeGridRef(p, ref)
+      );
+  }
+
+  private gestureSetPosition(event: number, x: number, y: number): void {
+    const L = GhosttySurfacePositionLayout;
+    this.gestureSet(event, GhosttySelectionGestureEventOption.POSITION, L.size, (v, p) => {
+      v.setFloat64(p + L.offset.x, x, true);
+      v.setFloat64(p + L.offset.y, y, true);
+    });
+  }
+
+  private gestureApply(event: number): TerminalSelection | null {
+    return this.outSelection('ghostty_selection_gesture_event', (out) =>
+      this.exports.ghostty_selection_gesture_event(this.gestureHandle(), this.handle, event, out)
+    );
+  }
+
+  /**
+   * Record a left press at `ref` with the pointer at surface pixel (x, y).
+   * Presses within `repeatIntervalNs` and `repeatDistance` pixels of the
+   * previous one count as double and triple clicks, which select a word and
+   * a line; the first click selects nothing and returns null.
+   */
+  gesturePress(
+    ref: GridRef,
+    options: {
+      x: number;
+      y: number;
+      timeNs?: bigint;
+      repeatDistance?: number;
+      repeatIntervalNs?: bigint;
+      behaviors?: [SelectionGestureBehavior, SelectionGestureBehavior, SelectionGestureBehavior];
+    }
+  ): TerminalSelection | null {
+    const event = this.gestureEvent(GhosttySelectionGestureEventType.PRESS);
+    const O = GhosttySelectionGestureEventOption;
+    this.gestureSetRef(event, ref);
+    this.gestureSetPosition(event, options.x, options.y);
+    if (options.timeNs === undefined) this.gestureSet(event, O.TIME_NS, 0);
+    else this.gestureSet(event, O.TIME_NS, 8, (v, p) => v.setBigUint64(p, options.timeNs!, true));
+    this.gestureSet(event, O.REPEAT_DISTANCE, 8, (v, p) =>
+      v.setFloat64(p, options.repeatDistance ?? 0, true)
+    );
+    this.gestureSet(event, O.REPEAT_INTERVAL_NS, 8, (v, p) =>
+      v.setBigUint64(p, options.repeatIntervalNs ?? 0n, true)
+    );
+    if (options.behaviors) {
+      const L = GhosttySelectionGestureBehaviorsLayout;
+      const [single, double, triple] = options.behaviors;
+      this.gestureSet(event, O.BEHAVIORS, L.size, (v, p) => {
+        v.setUint32(p + L.offset.single_click, single, true);
+        v.setUint32(p + L.offset.double_click, double, true);
+        v.setUint32(p + L.offset.triple_click, triple, true);
+      });
+    } else {
+      this.gestureSet(event, O.BEHAVIORS, 0);
+    }
+    return this.gestureApply(event);
+  }
+
+  /**
+   * Continue the active gesture with the pointer over `ref` at surface pixel
+   * (x, y). Returns the selection to show, or null when nothing changed yet
+   * (no press, or the drag has not crossed the within-cell threshold).
+   * Read gestureState().autoscroll afterwards to drive edge scrolling.
+   */
+  gestureDrag(
+    ref: GridRef,
+    options: { x: number; y: number; geometry: SelectionGestureGeometry; rectangle?: boolean }
+  ): TerminalSelection | null {
+    const event = this.gestureEvent(GhosttySelectionGestureEventType.DRAG);
+    const O = GhosttySelectionGestureEventOption;
+    this.gestureSetRef(event, ref);
+    this.gestureSetPosition(event, options.x, options.y);
+    const L = GhosttySelectionGestureGeometryLayout;
+    const g = options.geometry;
+    this.gestureSet(event, O.GEOMETRY, L.size, (v, p) => {
+      v.setUint32(p + L.offset.columns, g.columns, true);
+      v.setUint32(p + L.offset.cell_width, g.cellWidth, true);
+      v.setUint32(p + L.offset.padding_left, g.paddingLeft ?? 0, true);
+      v.setUint32(p + L.offset.screen_height, g.screenHeight, true);
+    });
+    this.gestureSet(event, O.RECTANGLE, 1, (v, p) => v.setUint8(p, options.rectangle ? 1 : 0));
+    return this.gestureApply(event);
+  }
+
+  /** End the active drag; `ref` is the cell under the pointer, or null if there was none. */
+  gestureRelease(ref: GridRef | null): void {
+    const event = this.gestureEvent(GhosttySelectionGestureEventType.RELEASE);
+    this.gestureSetRef(event, ref);
+    this.gestureApply(event);
+  }
+
+  /** Select the word around the active press anchor (force touch, long press). */
+  gestureDeepPress(): TerminalSelection | null {
+    return this.gestureApply(this.gestureEvent(GhosttySelectionGestureEventType.DEEP_PRESS));
+  }
+
+  /** Cancel the click sequence without freeing the gesture. */
+  gestureReset(): void {
+    if (this.gesture) this.exports.ghostty_selection_gesture_reset(this.gesture, this.handle);
+  }
+
+  /** Click count, drag flag, autoscroll direction and behavior of the gesture. */
+  gestureState(): SelectionGestureState {
+    const gesture = this.gestureHandle();
+    const out = this.exports.ghostty_wasm_alloc(4);
+    try {
+      const read = (data: GhosttySelectionGestureData, bytes: 1 | 4): number => {
+        new DataView(this.memory.buffer).setUint32(out, 0, true);
+        const r = this.exports.ghostty_selection_gesture_get(gesture, this.handle, data, out);
+        if (r !== GhosttyResult.SUCCESS) {
+          throw new Error(
+            `ghostty_selection_gesture_get(${GhosttySelectionGestureData[data]}) failed: ${GhosttyResult[r] ?? r}`
+          );
+        }
+        const view = new DataView(this.memory.buffer);
+        return bytes === 1 ? view.getUint8(out) : view.getUint32(out, true);
+      };
+      return {
+        clickCount: read(GhosttySelectionGestureData.CLICK_COUNT, 1),
+        dragged: read(GhosttySelectionGestureData.DRAGGED, 1) !== 0,
+        autoscroll: read(GhosttySelectionGestureData.AUTOSCROLL, 4) as SelectionGestureAutoscroll,
+        behavior: read(GhosttySelectionGestureData.BEHAVIOR, 4) as SelectionGestureBehavior,
+      };
+    } finally {
+      this.exports.ghostty_wasm_free(out, 4);
+    }
+  }
+
+  /** The cell of the active press, or null when no click sequence is active. */
+  gestureAnchor(): GridRef | null {
+    const gesture = this.gestureHandle();
+    const out = this.exports.ghostty_wasm_alloc(GhosttyGridRefLayout.size);
+    try {
+      const r = this.exports.ghostty_selection_gesture_get(
+        gesture,
+        this.handle,
+        GhosttySelectionGestureData.ANCHOR,
+        out
+      );
+      return r === GhosttyResult.SUCCESS ? this.readGridRef(out) : null;
+    } finally {
+      this.exports.ghostty_wasm_free(out, GhosttyGridRefLayout.size);
     }
   }
 

@@ -34,17 +34,12 @@ function setSelectionViewportRelative(
   endCol: number,
   endViewportRow: number
 ): void {
-  const selMgr = (term as any).selectionManager;
-  if (selMgr) {
-    (selMgr as any).selectionStart = {
-      col: startCol,
-      absoluteRow: viewportRowToAbsolute(term, startViewportRow),
-    };
-    (selMgr as any).selectionEnd = {
-      col: endCol,
-      absoluteRow: viewportRowToAbsolute(term, endViewportRow),
-    };
-  }
+  (term as any).selectionManager?.selectAbsolute(
+    startCol,
+    viewportRowToAbsolute(term, startViewportRow),
+    endCol,
+    viewportRowToAbsolute(term, endViewportRow)
+  );
 }
 
 function spyOnRendererRender(term: Terminal): {

@@ -35,6 +35,8 @@ import {
   GhosttyRenderStateRowCellsData as RowCellsData,
   GhosttyRowData as RowData,
   GhosttySelectionAdjust as SelectionAdjust,
+  GhosttySelectionGestureAutoscroll as SelectionGestureAutoscroll,
+  GhosttySelectionGestureBehavior as SelectionGestureBehavior,
   GhosttySelectionOrder as SelectionOrder,
   GhosttyStyleFlagsBit as StyleFlag,
   GhosttySysOption as SysOption,
@@ -68,6 +70,8 @@ export {
   RowCellsData,
   RowData,
   SelectionAdjust,
+  SelectionGestureAutoscroll,
+  SelectionGestureBehavior,
   SelectionOrder,
   StyleFlag,
   SysOption,
@@ -212,6 +216,26 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     aPtr: number,
     bPtr: number,
     outBoolPtr: number
+  ): number;
+
+  // Selection gestures (ghostty/include/ghostty/vt/selection.h)
+  ghostty_selection_gesture_new(allocator: number, gesturePtrPtr: number): number;
+  ghostty_selection_gesture_free(gesture: number, terminal: TerminalHandle): void;
+  ghostty_selection_gesture_reset(gesture: number, terminal: TerminalHandle): void;
+  ghostty_selection_gesture_get(
+    gesture: number,
+    terminal: TerminalHandle,
+    data: number,
+    valuePtr: number
+  ): number;
+  ghostty_selection_gesture_event_new(allocator: number, eventPtrPtr: number, type: number): number;
+  ghostty_selection_gesture_event_free(event: number): void;
+  ghostty_selection_gesture_event_set(event: number, option: number, valuePtr: number): number;
+  ghostty_selection_gesture_event(
+    gesture: number,
+    terminal: TerminalHandle,
+    event: number,
+    outSelPtr: number
   ): number;
 
   // Formatter (ghostty/include/ghostty/vt/formatter.h)
@@ -975,6 +999,28 @@ export interface TerminalSelection {
 export interface RowSelection {
   startCol: number;
   endCol: number;
+}
+
+/** Display geometry the selection gesture needs to interpret drags (GhosttySelectionGestureGeometry). */
+export interface SelectionGestureGeometry {
+  columns: number;
+  /** Width of one cell in surface pixels; must be non-zero. */
+  cellWidth: number;
+  paddingLeft?: number;
+  /** Height of the rendered surface in pixels; must be non-zero. */
+  screenHeight: number;
+}
+
+/** What the selection gesture currently knows (GhosttySelectionGestureData). */
+export interface SelectionGestureState {
+  /** 1, 2 or 3 while a click sequence is active, 0 when inactive. */
+  clickCount: number;
+  /** Whether the current or last left-click gesture dragged. */
+  dragged: boolean;
+  /** Direction the viewport should autoscroll while dragging past an edge. */
+  autoscroll: SelectionGestureAutoscroll;
+  /** What the current click count selects: cell, word, line or output. */
+  behavior: SelectionGestureBehavior;
 }
 
 /** Options for GhosttyTerminal.formatSelection(). */
