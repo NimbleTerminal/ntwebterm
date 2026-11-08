@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- CI runs on `v*` tags, and the `build-artifacts` workflow publishes a GitHub Release for each tag with the npm tarball, the runtime files (`ntwebterm.js`, `ntwebterm.umd.cjs`, `ntwebterm.d.ts`, `ghostty-vt.wasm`) and `SHA256SUMS`, using that version's changelog section as the notes. The tag must match `package.json`. Dispatch the workflow with `release_tag` to publish a Release for an existing tag. The `built` branch is still refreshed from main only.
+
 ## 0.5.0
 
 This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upstream release with a frozen C ABI, and continues the move from TypeScript reimplementations of terminal behavior to Ghostty's own. Paste, mouse reporting, focus reporting, text selection, search and the OSC/CSI effect callbacks now go through the library, and the hand-written TypeScript versions of selection, mouse encoding and paste sanitizing are gone. The bindings are generated from upstream's ABI manifest and checked against the built WASM. Because some of that behavior changed to match Ghostty and a few TypeScript-only knobs were removed (see Changed), this is a minor version bump.

@@ -1,9 +1,19 @@
 name: build-artifacts
 
+# Rebuilds the `built` branch from main (on push, daily, or on demand) and,
+# for a `v*` tag, attaches the same artifacts to a GitHub Release so each
+# version has an immutable download. Dispatch with `release_tag` to (re)create
+# the Release for a tag that already exists.
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing v* tag to build and publish as a GitHub Release (leave empty to refresh the built branch)'
+        required: false
+        type: string
   schedule:
     - cron: '0 7 * * *'
 
@@ -20,9 +30,32 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: main
+          # A tag push or a `release_tag` dispatch builds that tag; everything
+          # else (main push, schedule, plain dispatch) builds main.
+          ref: ${{ inputs.release_tag || github.ref }}
           submodules: recursive
           fetch-depth: 0
+      - name: Resolve release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG=""
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ -n "$TAG" ]; then
+            PKG_VERSION=$(node -p "require('./package.json').version")
+            if [ "v$PKG_VERSION" != "$TAG" ]; then
+              echo "❌ Tag $TAG does not match package.json version $PKG_VERSION"
+              exit 1
+            fi
+            echo "Releasing $TAG"
+          fi
       - uses: oven-sh/setup-bun@v2
       - uses: ./.github/actions/setup-zig
         with:
@@ -31,6 +64,7 @@ jobs:
       - run: bun run build
       - run: bun run fmt && bun run lint && bun run typecheck && bun test
       - name: Publish built branch
+        if: steps.release.outputs.tag == ''
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -43,3 +77,30 @@ jobs:
           git add -f dist ghostty-vt.wasm
           git commit -m "build: artifacts from ${SOURCE_SHA}" -m "CI: ${RUN_URL}"
           git push --force-with-lease="refs/heads/built:${EXPECTED}" origin HEAD:built
+      - name: Publish GitHub Release
+        if: steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          VERSION="${TAG#v}"
+          mkdir -p release
+          # The npm tarball (dist, ghostty-vt.wasm, README) plus the runtime
+          # files on their own for hosts that serve them directly. JavaScript
+          # and WASM must come from the same build.
+          bun pm pack --destination release
+          cp dist/ntwebterm.js dist/ntwebterm.umd.cjs dist/ntwebterm.d.ts ghostty-vt.wasm release/
+          (cd release && sha256sum ./* > SHA256SUMS)
+          # Release notes: this version's CHANGELOG section, if there is one.
+          awk -v v="$VERSION" '$0 ~ "^## "v"( |$)"{p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "Release $TAG. See CHANGELOG.md." > notes.md
+          fi
+          printf '\n---\nBuilt from %s by %s\n' "$(git rev-parse HEAD)" "$RUN_URL" >> notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" release/* --title "$TAG" --notes-file notes.md --verify-tag
+          fi
