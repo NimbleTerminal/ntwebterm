@@ -172,7 +172,10 @@ void main() {
   if ((flags & FLAG_IS_CURSOR_CELL) != 0u) { bg = pal.cursorBg.rgb; fg = pal.cursorFg.rgb; }
   if (uTextPass == 3 && (flags & FLAG_IS_CURSOR_CELL) == 0u) discard;
   if (uTextPass == 1) {
-    bool defaultBg = (flags & FLAG_INVERSE) != 0u ? (flags & FLAG_USE_THEME_FG) != 0u : (flags & FLAG_USE_THEME_BG) != 0u;
+    // Skip only cells whose background is the theme default already on the
+    // canvas. An inverse cell's background is its fg (the theme fg when
+    // unset), so it is always painted.
+    bool defaultBg = (flags & FLAG_INVERSE) == 0u && (flags & FLAG_USE_THEME_BG) != 0u;
     if (defaultBg && (flags & (FLAG_IS_SELECTED | FLAG_IS_CURSOR_CELL)) == 0u) discard;
     fragColor = vec4(bg, 1.0); return;
   }

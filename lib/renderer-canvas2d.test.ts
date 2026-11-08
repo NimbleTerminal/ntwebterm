@@ -488,6 +488,101 @@ describe('CanvasRenderer', () => {
   });
 });
 
+describe('inverse video (canvas2d)', () => {
+  function makeCellI(overrides: Partial<GhosttyCell> = {}): GhosttyCell {
+    return {
+      codepoint: 'x'.codePointAt(0)!,
+      fg_r: 0,
+      fg_g: 0,
+      fg_b: 0,
+      bg_r: 0,
+      bg_g: 0,
+      bg_b: 0,
+      fgIsDefault: true,
+      bgIsDefault: true,
+      flags: 0,
+      width: 1,
+      hyperlink_id: 0,
+      grapheme_len: 0,
+      grapheme: null,
+      ...overrides,
+    };
+  }
+
+  /** Renders one row and records the fill color of every background rect and glyph. */
+  function paint(line: GhosttyCell[]) {
+    const canvas = document.createElement('canvas');
+    const renderer = new CanvasRenderer(canvas);
+    (renderer as any).metrics = { width: 10, height: 20, baseline: 15 };
+    let fillStyle = '';
+    const rects: { x: number; color: string }[] = [];
+    const texts: { x: number; color: string }[] = [];
+    (renderer as any).ctx = {
+      clearRect() {},
+      fillRect(x: number) {
+        rects.push({ x, color: fillStyle });
+      },
+      beginPath() {},
+      rect() {},
+      clip() {},
+      save() {},
+      restore() {},
+      stroke() {},
+      strokeRect() {},
+      moveTo() {},
+      lineTo() {},
+      setLineDash() {},
+      drawImage() {},
+      measureText() {
+        return { width: 10 };
+      },
+      fillText(_char: string, x: number) {
+        texts.push({ x, color: fillStyle });
+      },
+      set font(_v: string) {},
+      set fillStyle(value: string) {
+        fillStyle = value;
+      },
+      set strokeStyle(_v: string) {},
+      set lineWidth(_v: number) {},
+      set globalAlpha(_v: number) {},
+    };
+    (renderer as any).renderLine(line, 0, line.length);
+    renderer.destroy();
+    // The row-wide theme.background fill comes first; per-cell rects follow.
+    const cellRects = rects.filter((r) => r.color !== DEFAULT_THEME.background);
+    return { cellRects, texts };
+  }
+
+  const INVERSE = 1 << 4; // CellFlags.INVERSE
+
+  test('inverse with default colors (zsh paste highlight) paints theme fg behind theme-bg text', () => {
+    const { cellRects, texts } = paint([makeCellI({ flags: INVERSE })]);
+    expect(cellRects).toEqual([{ x: 0, color: DEFAULT_THEME.foreground }]);
+    expect(texts).toEqual([{ x: 0, color: DEFAULT_THEME.background }]);
+  });
+
+  test('inverse with an explicit fg paints that fg behind theme-bg text', () => {
+    const red = { fg_r: 204, fg_g: 102, fg_b: 102, fgIsDefault: false };
+    const { cellRects, texts } = paint([makeCellI({ flags: INVERSE, ...red })]);
+    expect(cellRects).toEqual([{ x: 0, color: 'rgb(204, 102, 102)' }]);
+    expect(texts).toEqual([{ x: 0, color: DEFAULT_THEME.background }]);
+  });
+
+  test('inverse with an explicit bg paints theme fg behind text in that bg color', () => {
+    const blue = { bg_r: 0, bg_g: 0, bg_b: 200, bgIsDefault: false };
+    const { cellRects, texts } = paint([makeCellI({ flags: INVERSE, ...blue })]);
+    expect(cellRects).toEqual([{ x: 0, color: DEFAULT_THEME.foreground }]);
+    expect(texts).toEqual([{ x: 0, color: 'rgb(0, 0, 200)' }]);
+  });
+
+  test('a plain default-color cell paints no background rect and theme-fg text', () => {
+    const { cellRects, texts } = paint([makeCellI()]);
+    expect(cellRects).toEqual([]);
+    expect(texts).toEqual([{ x: 0, color: DEFAULT_THEME.foreground }]);
+  });
+});
+
 describe('bidi reordering (canvas2d)', () => {
   function makeCellC(overrides: Partial<GhosttyCell> = {}): GhosttyCell {
     return {

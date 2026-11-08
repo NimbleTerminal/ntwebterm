@@ -26,6 +26,10 @@
 - Pasted text follows upstream's encoding: newlines become carriage returns when bracketed paste is off (as in xterm.js), and control bytes such as ESC are replaced with spaces rather than the `\x1b[20x~` markers being stripped. The hand-written sanitizers in `Terminal.paste()` and the input handler are gone; `InputHandler` takes an `onPaste` callback and sends raw text to `onData` without one.
 - `Key`, `KeyEncoderOption` and `DirtyState` now use upstream's member names (`DIGIT_0`, `ARROW_UP`, `NUMPAD_ADD`, `BACKQUOTE`, `KITTY_FLAGS`, `FALSE`); the previous names remain as deprecated aliases. Struct offsets in the WASM bridge come from the generated `*Layout` constants instead of literals.
 
+### Fixed
+
+- Render inverse-video cells with default colors correctly in all three renderers. The background pass skipped them as if their background were the theme default, so WebGL/WebGPU drew the glyph in the theme background color on an unpainted cell (invisible on a dark theme) and Canvas2D dropped the highlight. zsh paints pasted text this way (`paste:standout`), which made pasted text appear black.
+
 ## 0.4.2
 
 ### Added
