@@ -34,6 +34,8 @@ import {
   GhosttyRenderStateRowOption as RenderStateRowOption,
   GhosttyRenderStateRowCellsData as RowCellsData,
   GhosttyRowData as RowData,
+  GhosttySelectionAdjust as SelectionAdjust,
+  GhosttySelectionOrder as SelectionOrder,
   GhosttyStyleFlagsBit as StyleFlag,
   GhosttySysOption as SysOption,
   GhosttyTerminalData as TerminalData,
@@ -65,6 +67,8 @@ export {
   RenderStateRowOption,
   RowCellsData,
   RowData,
+  SelectionAdjust,
+  SelectionOrder,
   StyleFlag,
   SysOption,
   TerminalData,
@@ -151,6 +155,79 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_mouse_event_set_mods(event: number, mods: number): number;
   /** `position` is a GhosttyMousePosition passed by value: wasm32 passes a pointer to { x: f32, y: f32 }. */
   ghostty_mouse_event_set_position(event: number, positionPtr: number): number;
+
+  // Selection (ghostty/include/ghostty/vt/selection.h)
+  ghostty_terminal_point_from_grid_ref(
+    terminal: TerminalHandle,
+    refPtr: number,
+    tag: number,
+    outCoordinatePtr: number
+  ): number;
+  ghostty_terminal_select_word(
+    terminal: TerminalHandle,
+    optionsPtr: number,
+    outSelPtr: number
+  ): number;
+  ghostty_terminal_select_word_between(
+    terminal: TerminalHandle,
+    optionsPtr: number,
+    outSelPtr: number
+  ): number;
+  ghostty_terminal_select_line(
+    terminal: TerminalHandle,
+    optionsPtr: number,
+    outSelPtr: number
+  ): number;
+  ghostty_terminal_select_all(terminal: TerminalHandle, outSelPtr: number): number;
+  ghostty_terminal_select_output(
+    terminal: TerminalHandle,
+    refPtr: number,
+    outSelPtr: number
+  ): number;
+  ghostty_terminal_selection_adjust(
+    terminal: TerminalHandle,
+    selPtr: number,
+    adjust: number
+  ): number;
+  ghostty_terminal_selection_order(
+    terminal: TerminalHandle,
+    selPtr: number,
+    outOrderPtr: number
+  ): number;
+  ghostty_terminal_selection_ordered(
+    terminal: TerminalHandle,
+    selPtr: number,
+    desired: number,
+    outSelPtr: number
+  ): number;
+  /** `point` is a GhosttyPoint passed by value: wasm32 passes a pointer to it. */
+  ghostty_terminal_selection_contains(
+    terminal: TerminalHandle,
+    selPtr: number,
+    pointPtr: number,
+    outBoolPtr: number
+  ): number;
+  ghostty_terminal_selection_equal(
+    terminal: TerminalHandle,
+    aPtr: number,
+    bPtr: number,
+    outBoolPtr: number
+  ): number;
+
+  // Formatter (ghostty/include/ghostty/vt/formatter.h)
+  ghostty_formatter_terminal_new(
+    allocator: number,
+    formatterPtrPtr: number,
+    terminal: TerminalHandle
+  ): number;
+  ghostty_formatter_free(formatter: number): void;
+  ghostty_formatter_set(formatter: number, option: number, valuePtr: number): number;
+  ghostty_formatter_format_alloc(
+    formatter: number,
+    allocator: number,
+    outPtrPtr: number,
+    outLenPtr: number
+  ): number;
 
   // Focus reporting (ghostty/include/ghostty/vt/focus.h)
   ghostty_focus_encode(event: number, bufPtr: number, bufLen: number, writtenPtr: number): number;
@@ -869,6 +946,46 @@ export interface ResizeRequest {
 
 /** Answer to a CSI ? 996 n color scheme query. Mirrors GhosttyColorScheme. */
 export type ColorScheme = 'light' | 'dark';
+
+/**
+ * Untracked reference to one cell (GhosttyGridRef). It is a snapshot: valid
+ * until the next call that changes the terminal (write, resize, reset,
+ * setSelection...). Obtain one with GhosttyTerminal.gridRef().
+ */
+export interface GridRef {
+  node: number;
+  x: number;
+  y: number;
+}
+
+/**
+ * A range of terminal content between two cells, both included
+ * (GhosttySelection). Linear selections flow like text; rectangular ones use
+ * start and end as opposite corners. The ends keep the direction the user
+ * selected in; use GhosttyTerminal.selectionOrdered() for top-left first.
+ * Same lifetime as GridRef unless installed with setSelection().
+ */
+export interface TerminalSelection {
+  start: GridRef;
+  end: GridRef;
+  rectangle: boolean;
+}
+
+/** Row-local selected range from the render state, inclusive columns. */
+export interface RowSelection {
+  startCol: number;
+  endCol: number;
+}
+
+/** Options for GhosttyTerminal.formatSelection(). */
+export interface FormatOptions {
+  /** 'plain' text (default), 'vt' escape sequences, or 'html'. */
+  emit?: 'plain' | 'vt' | 'html';
+  /** Join soft-wrapped rows the way the program wrote them. Default true. */
+  unwrap?: boolean;
+  /** Remove trailing spaces from each line. Default true. */
+  trim?: boolean;
+}
 
 /** A normalized mouse event for GhosttyTerminal.encodeMouse(). */
 export interface MouseReport {

@@ -23,6 +23,8 @@ import {
   GhosttyColorRgbLayout,
   GhosttyColorScheme,
   GhosttyFocusEvent,
+  GhosttyFormatterFormat,
+  GhosttyFormatterOption,
   GhosttyGridRefLayout,
   GhosttyKittyGraphicsPlacementRenderInfoLayout,
   GhosttyMimeReaderLayout,
@@ -35,7 +37,9 @@ import {
   GhosttyPointCoordinateLayout,
   GhosttyPointLayout,
   GhosttyPointValueLayout,
+  GhosttyRenderStateRowSelectionLayout,
   GhosttyResult,
+  GhosttySelectionLayout,
   GhosttySizeReportSizeLayout,
   GhosttyStringLayout,
   GhosttyStyleColorLayout,
@@ -50,6 +54,9 @@ import {
   GhosttyTerminalResizeWindowLayout,
   GhosttyTerminalResizeWindowTag,
   GhosttyTerminalResizeWindowValueLayout,
+  GhosttyTerminalSelectLineOptionsLayout,
+  GhosttyTerminalSelectWordBetweenOptionsLayout,
+  GhosttyTerminalSelectWordOptionsLayout,
   GhosttyTerminalSemanticPromptLayout,
   GhosttyWriterLayout,
 } from './ghostty-abi';
@@ -67,9 +74,11 @@ import {
   CursorVisualStyle,
   type DesktopNotification,
   DirtyState,
+  type FormatOptions,
   type GhosttyCell,
   type GhosttyTerminalConfig,
   type GhosttyWasmExports,
+  type GridRef,
   KeyEncoderOption,
   type KeyEvent,
   KittyGraphicsData,
@@ -96,6 +105,9 @@ import {
   type ResizeRequest,
   RowCellsData,
   RowData,
+  type RowSelection,
+  type SelectionAdjust,
+  SelectionOrder,
   type SemanticPromptEvent,
   StyleFlag,
   SysOption,
@@ -103,6 +115,7 @@ import {
   type TerminalHandle,
   TerminalOption,
   TerminalScreen,
+  type TerminalSelection,
   packMode,
 } from './types';
 import {
@@ -716,6 +729,12 @@ export class GhosttyTerminal {
    */
   private rowWrapCache: boolean[] | null = null;
 
+  /** Per-row selected range from the render state; same lifecycle as rowDirtyCache. */
+  private rowSelectionCache: (RowSelection | null)[] | null = null;
+
+  /** Lazily created GhosttyFormatter for formatSelection(). */
+  private formatter = 0;
+
   /**
    * Bytes the terminal would have written back to a real PTY in response
    * to query sequences (DSR, XTVERSION, in-band size reports, ...).
@@ -898,6 +917,8 @@ export class GhosttyTerminal {
       const r = this.exports.ghostty_render_state_update(this.renderHandle, this.handle);
       if (r === 0) {
         this.rowDirtyCache = null;
+        this.rowSelectionCache = null;
+        this.rowSelectionCache = null;
         this.rowWrapCache = null;
         const dirty = this.rsGetU32(RenderStateData.DIRTY) as DirtyState;
         if (dirty !== DirtyState.FALSE) {
@@ -1396,6 +1417,7 @@ export class GhosttyTerminal {
     this.renderHeld = false;
     this.hasCapturedHoldFrame = false;
     this.rowDirtyCache = null;
+    this.rowSelectionCache = null;
     this.rowWrapCache = null;
     this.pendingResponses = [];
     this.pendingProgramStatus = [];
@@ -1731,6 +1753,10 @@ export class GhosttyTerminal {
     this.renderImages = undefined;
     this.mouseEncoder?.free();
     this.mouseEncoder = undefined;
+    if (this.formatter) {
+      this.exports.ghostty_formatter_free(this.formatter);
+      this.formatter = 0;
+    }
     this.exports.ghostty_terminal_free(this.handle);
   }
 
@@ -1759,6 +1785,7 @@ export class GhosttyTerminal {
     if (r !== 0) throw new Error(`ghostty_render_state_update failed: ${r}`);
     // Per-row caches are tied to the previous snapshot.
     this.rowDirtyCache = null;
+    this.rowSelectionCache = null;
     this.rowWrapCache = null;
     // GhosttyRenderStateDirty is a 4-byte enum (FALSE=0, PARTIAL=1, FULL=2).
     return this.rsGetU32(RenderStateData.DIRTY) as DirtyState;
@@ -1875,6 +1902,7 @@ export class GhosttyTerminal {
     this.update();
     const dirty = new Array<boolean>(this._rows).fill(false);
     const wrap = new Array<boolean>(this._rows).fill(false);
+    const selection = new Array<RowSelection | null>(this._rows).fill(null);
     this.populateHandle(
       (out) =>
         this.exports.ghostty_render_state_get(this.renderHandle, RenderStateData.ROW_ITERATOR, out),
@@ -1883,6 +1911,7 @@ export class GhosttyTerminal {
     const dirtyPtr = this.exports.ghostty_wasm_alloc(1);
     const rawPtr = this.exports.ghostty_wasm_alloc(8); // GhosttyRow = u64
     const wrapPtr = this.exports.ghostty_wasm_alloc(1);
+    const selPtr = this.exports.ghostty_wasm_alloc(GhosttyRenderStateRowSelectionLayout.size);
     try {
       let row = 0;
       while (
@@ -1898,6 +1927,7 @@ export class GhosttyTerminal {
         const rowU64 = new DataView(this.memory.buffer).getBigUint64(rawPtr, true);
         this.exports.ghostty_row_get(rowU64, RowData.WRAP_CONTINUATION, wrapPtr);
         wrap[row] = new DataView(this.memory.buffer).getUint8(wrapPtr) !== 0;
+        selection[row] = this.readRowSelection(selPtr);
 
         row++;
       }
@@ -1905,9 +1935,38 @@ export class GhosttyTerminal {
       this.exports.ghostty_wasm_free(dirtyPtr, 1);
       this.exports.ghostty_wasm_free(rawPtr, 8);
       this.exports.ghostty_wasm_free(wrapPtr, 1);
+      this.exports.ghostty_wasm_free(selPtr, GhosttyRenderStateRowSelectionLayout.size);
     }
     this.rowDirtyCache = dirty;
     this.rowWrapCache = wrap;
+    this.rowSelectionCache = selection;
+  }
+
+  /** Read GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION for the iterator's current row. */
+  private readRowSelection(selPtr: number): RowSelection | null {
+    const L = GhosttyRenderStateRowSelectionLayout;
+    new DataView(this.memory.buffer).setUint32(selPtr + L.offset.size, L.size, true);
+    const r = this.exports.ghostty_render_state_row_get(
+      this.rowIter,
+      RenderStateRowData.SELECTION,
+      selPtr
+    );
+    if (r !== GhosttyResult.SUCCESS) return null;
+    const view = new DataView(this.memory.buffer);
+    return {
+      startCol: view.getUint16(selPtr + L.offset.start_x, true),
+      endCol: view.getUint16(selPtr + L.offset.end_x, true),
+    };
+  }
+
+  /**
+   * The selected column range of a viewport row from the render state, or
+   * null when the row does not intersect the terminal's selection.
+   */
+  getRowSelection(y: number): RowSelection | null {
+    if (y < 0 || y >= this._rows) return null;
+    if (this.rowSelectionCache === null) this.refreshRowMetaCache();
+    return this.rowSelectionCache![y] ?? null;
   }
 
   /**
@@ -1940,6 +1999,7 @@ export class GhosttyTerminal {
 
     // Caches captured the now-stale "dirty" state.
     this.rowDirtyCache = null;
+    this.rowSelectionCache = null;
     this.hasCapturedHoldFrame = false;
   }
 
@@ -2020,13 +2080,15 @@ export class GhosttyTerminal {
     // on this snapshot.
     const dirtyCache = new Array<boolean>(this._rows).fill(false);
     const wrapCache = new Array<boolean>(this._rows).fill(false);
+    const selectionCache = new Array<RowSelection | null>(this._rows).fill(null);
+    const selPtr = this.exports.ghostty_wasm_alloc(GhosttyRenderStateRowSelectionLayout.size);
     try {
       let row = 0;
       while (
         row < this._rows &&
         this.exports.ghostty_render_state_row_iterator_next(this.rowIter)
       ) {
-        // Capture per-row dirty + wrap for the caches.
+        // Capture per-row dirty + wrap + selection for the caches.
         this.exports.ghostty_render_state_row_get(this.rowIter, RenderStateRowData.DIRTY, dirtyPtr);
         dirtyCache[row] = new DataView(this.memory.buffer).getUint8(dirtyPtr) !== 0;
 
@@ -2034,6 +2096,7 @@ export class GhosttyTerminal {
         const rowU64 = new DataView(this.memory.buffer).getBigUint64(rawPtr, true);
         this.exports.ghostty_row_get(rowU64, RowData.WRAP_CONTINUATION, wrapPtr);
         wrapCache[row] = new DataView(this.memory.buffer).getUint8(wrapPtr) !== 0;
+        selectionCache[row] = this.readRowSelection(selPtr);
 
         // Bind rowCells to this row.
         this.populateHandle(
@@ -2204,10 +2267,12 @@ export class GhosttyTerminal {
       this.exports.ghostty_wasm_free(widePtr, 4);
       this.exports.ghostty_wasm_free(graphemeBufPtr, GRAPHEME_SCRATCH_BYTES);
       this.exports.ghostty_wasm_free(cpBufPtr, GhosttyCodepointBufferLayout.size);
+      this.exports.ghostty_wasm_free(selPtr, GhosttyRenderStateRowSelectionLayout.size);
     }
 
     this.rowDirtyCache = dirtyCache;
     this.rowWrapCache = wrapCache;
+    this.rowSelectionCache = selectionCache;
     return this.cellPool;
   }
 
@@ -2506,6 +2571,363 @@ export class GhosttyTerminal {
   getScrollbackHyperlinkUri(offset: number, col: number): string | null {
     if (col < 0 || col >= this._cols) return null;
     return this.readHyperlinkUri(PointTag.HISTORY, offset, col);
+  }
+
+  // ==========================================================================
+  // Selection (ghostty/include/ghostty/vt/selection.h, formatter.h)
+  // ==========================================================================
+
+  private writeGridRef(ptr: number, ref: GridRef): void {
+    const view = new DataView(this.memory.buffer);
+    const o = GhosttyGridRefLayout.offset;
+    view.setUint32(ptr + o.node, ref.node, true);
+    view.setUint16(ptr + o.x, ref.x, true);
+    view.setUint16(ptr + o.y, ref.y, true);
+  }
+
+  private readGridRef(ptr: number): GridRef {
+    const view = new DataView(this.memory.buffer);
+    const o = GhosttyGridRefLayout.offset;
+    return {
+      node: view.getUint32(ptr + o.node, true),
+      x: view.getUint16(ptr + o.x, true),
+      y: view.getUint16(ptr + o.y, true),
+    };
+  }
+
+  private writeSelection(ptr: number, sel: TerminalSelection): void {
+    const o = GhosttySelectionLayout.offset;
+    new Uint8Array(this.memory.buffer, ptr, GhosttySelectionLayout.size).fill(0);
+    this.writeGridRef(ptr + o.start, sel.start);
+    this.writeGridRef(ptr + o.end, sel.end);
+    new DataView(this.memory.buffer).setUint8(ptr + o.rectangle, sel.rectangle ? 1 : 0);
+  }
+
+  private readSelection(ptr: number): TerminalSelection {
+    const o = GhosttySelectionLayout.offset;
+    return {
+      start: this.readGridRef(ptr + o.start),
+      end: this.readGridRef(ptr + o.end),
+      rectangle: new DataView(this.memory.buffer).getUint8(ptr + o.rectangle) !== 0,
+    };
+  }
+
+  /**
+   * Run `fn` with a scratch GhosttySelection output; null on GHOSTTY_NO_VALUE
+   * (nothing to select there), a thrown error on any other failure.
+   */
+  private outSelection(what: string, fn: (outPtr: number) => number): TerminalSelection | null {
+    const out = this.exports.ghostty_wasm_alloc(GhosttySelectionLayout.size);
+    try {
+      new Uint8Array(this.memory.buffer, out, GhosttySelectionLayout.size).fill(0);
+      const r = fn(out);
+      if (r === GhosttyResult.NO_VALUE) return null;
+      if (r !== GhosttyResult.SUCCESS) throw new Error(`${what} failed: ${GhosttyResult[r] ?? r}`);
+      return this.readSelection(out);
+    } finally {
+      this.exports.ghostty_wasm_free(out, GhosttySelectionLayout.size);
+    }
+  }
+
+  /** Run `fn` with `sel` written to scratch memory. */
+  private withSelection<T>(sel: TerminalSelection, fn: (selPtr: number) => T): T {
+    const ptr = this.exports.ghostty_wasm_alloc(GhosttySelectionLayout.size);
+    try {
+      this.writeSelection(ptr, sel);
+      return fn(ptr);
+    } finally {
+      this.exports.ghostty_wasm_free(ptr, GhosttySelectionLayout.size);
+    }
+  }
+
+  private withGridRef<T>(ref: GridRef, fn: (refPtr: number) => T): T {
+    const ptr = this.exports.ghostty_wasm_alloc(GhosttyGridRefLayout.size);
+    try {
+      this.writeGridRef(ptr, ref);
+      return fn(ptr);
+    } finally {
+      this.exports.ghostty_wasm_free(ptr, GhosttyGridRefLayout.size);
+    }
+  }
+
+  /**
+   * Reference to the cell at (x, y) in the given coordinate space, or null
+   * when there is no such cell. The result is a snapshot; see GridRef.
+   */
+  gridRef(tag: PointTag, x: number, y: number): GridRef | null {
+    const pointPtr = this.allocPoint(tag, x, y);
+    const refPtr = this.exports.ghostty_wasm_alloc(GhosttyGridRefLayout.size);
+    try {
+      const r = this.exports.ghostty_terminal_grid_ref(this.handle, pointPtr, refPtr);
+      return r === GhosttyResult.SUCCESS ? this.readGridRef(refPtr) : null;
+    } finally {
+      this.exports.ghostty_wasm_free(refPtr, GhosttyGridRefLayout.size);
+      this.exports.ghostty_wasm_free(pointPtr, GhosttyPointLayout.size);
+    }
+  }
+
+  /**
+   * The (x, y) of a grid reference in the given coordinate space, or null
+   * when it cannot be expressed there (a history cell in ACTIVE coordinates,
+   * a cell scrolled out of the VIEWPORT, ...).
+   */
+  pointFromGridRef(ref: GridRef, tag: PointTag): { x: number; y: number } | null {
+    return this.withGridRef(ref, (refPtr) => {
+      const out = this.exports.ghostty_wasm_alloc(GhosttyPointCoordinateLayout.size);
+      try {
+        const r = this.exports.ghostty_terminal_point_from_grid_ref(this.handle, refPtr, tag, out);
+        if (r === GhosttyResult.NO_VALUE) return null;
+        if (r !== GhosttyResult.SUCCESS) {
+          throw new Error(`ghostty_terminal_point_from_grid_ref failed: ${GhosttyResult[r] ?? r}`);
+        }
+        const view = new DataView(this.memory.buffer);
+        return {
+          x: view.getUint16(out + GhosttyPointCoordinateLayout.offset.x, true),
+          y: view.getUint32(out + GhosttyPointCoordinateLayout.offset.y, true),
+        };
+      } finally {
+        this.exports.ghostty_wasm_free(out, GhosttyPointCoordinateLayout.size);
+      }
+    });
+  }
+
+  /**
+   * The active screen's selection as an untracked snapshot, or null. The
+   * terminal tracks its own selection across writes, scrolling and resizes.
+   */
+  getSelection(): TerminalSelection | null {
+    return this.outSelection('ghostty_terminal_get(SELECTION)', (out) =>
+      this.exports.ghostty_terminal_get(this.handle, TerminalData.SELECTION, out)
+    );
+  }
+
+  /** Install `sel` as the terminal's tracked selection, or clear it with null. */
+  setSelection(sel: TerminalSelection | null): void {
+    const r =
+      sel === null
+        ? this.exports.ghostty_terminal_set(this.handle, TerminalOption.SELECTION, 0)
+        : this.withSelection(sel, (ptr) =>
+            this.exports.ghostty_terminal_set(this.handle, TerminalOption.SELECTION, ptr)
+          );
+    if (r !== GhosttyResult.SUCCESS) {
+      throw new Error(`ghostty_terminal_set(SELECTION) failed: ${GhosttyResult[r] ?? r}`);
+    }
+    this.rowSelectionCache = null;
+  }
+
+  /** The word under `ref` by Ghostty's word boundaries, or null on a blank cell. */
+  selectWord(ref: GridRef): TerminalSelection | null {
+    const L = GhosttyTerminalSelectWordOptionsLayout;
+    const opts = this.exports.ghostty_wasm_alloc(L.size);
+    try {
+      new Uint8Array(this.memory.buffer, opts, L.size).fill(0);
+      new DataView(this.memory.buffer).setUint32(opts + L.offset.size, L.size, true);
+      this.writeGridRef(opts + L.offset.ref, ref);
+      return this.outSelection('ghostty_terminal_select_word', (out) =>
+        this.exports.ghostty_terminal_select_word(this.handle, opts, out)
+      );
+    } finally {
+      this.exports.ghostty_wasm_free(opts, L.size);
+    }
+  }
+
+  /** The nearest word searching from `start` toward `end` (inclusive), or null. */
+  selectWordBetween(start: GridRef, end: GridRef): TerminalSelection | null {
+    const L = GhosttyTerminalSelectWordBetweenOptionsLayout;
+    const opts = this.exports.ghostty_wasm_alloc(L.size);
+    try {
+      new Uint8Array(this.memory.buffer, opts, L.size).fill(0);
+      new DataView(this.memory.buffer).setUint32(opts + L.offset.size, L.size, true);
+      this.writeGridRef(opts + L.offset.start, start);
+      this.writeGridRef(opts + L.offset.end, end);
+      return this.outSelection('ghostty_terminal_select_word_between', (out) =>
+        this.exports.ghostty_terminal_select_word_between(this.handle, opts, out)
+      );
+    } finally {
+      this.exports.ghostty_wasm_free(opts, L.size);
+    }
+  }
+
+  /**
+   * The line under `ref` with Ghostty's whitespace trimmed, or null when it is
+   * blank. With `semanticPromptBoundary` the line stops at OSC 133 prompt
+   * changes, so a prompt line selects the input without the prompt.
+   */
+  selectLine(
+    ref: GridRef,
+    options: { semanticPromptBoundary?: boolean } = {}
+  ): TerminalSelection | null {
+    const L = GhosttyTerminalSelectLineOptionsLayout;
+    const opts = this.exports.ghostty_wasm_alloc(L.size);
+    try {
+      new Uint8Array(this.memory.buffer, opts, L.size).fill(0);
+      const view = new DataView(this.memory.buffer);
+      view.setUint32(opts + L.offset.size, L.size, true);
+      this.writeGridRef(opts + L.offset.ref, ref);
+      view.setUint8(
+        opts + L.offset.semantic_prompt_boundary,
+        options.semanticPromptBoundary ? 1 : 0
+      );
+      return this.outSelection('ghostty_terminal_select_line', (out) =>
+        this.exports.ghostty_terminal_select_line(this.handle, opts, out)
+      );
+    } finally {
+      this.exports.ghostty_wasm_free(opts, L.size);
+    }
+  }
+
+  /** All selectable content (scrollback included), or null when there is none. */
+  selectAll(): TerminalSelection | null {
+    return this.outSelection('ghostty_terminal_select_all', (out) =>
+      this.exports.ghostty_terminal_select_all(this.handle, out)
+    );
+  }
+
+  /** The command output around `ref`, from OSC 133 markers, or null. */
+  selectOutput(ref: GridRef): TerminalSelection | null {
+    return this.withGridRef(ref, (refPtr) =>
+      this.outSelection('ghostty_terminal_select_output', (out) =>
+        this.exports.ghostty_terminal_select_output(this.handle, refPtr, out)
+      )
+    );
+  }
+
+  /** Which way the ends of `sel` are ordered in the terminal. */
+  selectionOrder(sel: TerminalSelection): SelectionOrder {
+    return this.withSelection(sel, (selPtr) => {
+      const out = this.exports.ghostty_wasm_alloc(4);
+      try {
+        const r = this.exports.ghostty_terminal_selection_order(this.handle, selPtr, out);
+        if (r !== GhosttyResult.SUCCESS) {
+          throw new Error(`ghostty_terminal_selection_order failed: ${GhosttyResult[r] ?? r}`);
+        }
+        return new DataView(this.memory.buffer).getUint32(out, true) as SelectionOrder;
+      } finally {
+        this.exports.ghostty_wasm_free(out, 4);
+      }
+    });
+  }
+
+  /** A copy of `sel` with its ends in the requested order (top-left first by default). */
+  selectionOrdered(
+    sel: TerminalSelection,
+    desired: SelectionOrder = SelectionOrder.FORWARD
+  ): TerminalSelection {
+    return this.withSelection(
+      sel,
+      (selPtr) =>
+        this.outSelection('ghostty_terminal_selection_ordered', (out) =>
+          this.exports.ghostty_terminal_selection_ordered(this.handle, selPtr, desired, out)
+        )!
+    );
+  }
+
+  /** Move the logical end of `sel` as keyboard selection does; returns the adjusted copy. */
+  selectionAdjust(sel: TerminalSelection, adjust: SelectionAdjust): TerminalSelection {
+    return this.withSelection(sel, (selPtr) => {
+      const r = this.exports.ghostty_terminal_selection_adjust(this.handle, selPtr, adjust);
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(`ghostty_terminal_selection_adjust failed: ${GhosttyResult[r] ?? r}`);
+      }
+      return this.readSelection(selPtr);
+    });
+  }
+
+  /** Whether the cell at (x, y) in the given coordinate space is inside `sel`. */
+  selectionContains(sel: TerminalSelection, tag: PointTag, x: number, y: number): boolean {
+    return this.withSelection(sel, (selPtr) => {
+      const pointPtr = this.allocPoint(tag, x, y);
+      const out = this.exports.ghostty_wasm_alloc(1);
+      try {
+        const r = this.exports.ghostty_terminal_selection_contains(
+          this.handle,
+          selPtr,
+          pointPtr,
+          out
+        );
+        if (r !== GhosttyResult.SUCCESS) {
+          throw new Error(`ghostty_terminal_selection_contains failed: ${GhosttyResult[r] ?? r}`);
+        }
+        return new DataView(this.memory.buffer).getUint8(out) !== 0;
+      } finally {
+        this.exports.ghostty_wasm_free(out, 1);
+        this.exports.ghostty_wasm_free(pointPtr, GhosttyPointLayout.size);
+      }
+    });
+  }
+
+  /**
+   * The text of `sel` (or of the whole screen when null) through libghostty's
+   * formatter. Defaults match what Ghostty copies to the clipboard: plain
+   * text, soft-wrapped rows joined, trailing spaces trimmed.
+   */
+  formatSelection(sel: TerminalSelection | null, options: FormatOptions = {}): string {
+    if (!this.formatter) {
+      const ptrPtr = this.exports.ghostty_wasm_alloc_opaque();
+      try {
+        const r = this.exports.ghostty_formatter_terminal_new(0, ptrPtr, this.handle);
+        if (r !== GhosttyResult.SUCCESS) {
+          throw new Error(`ghostty_formatter_terminal_new failed: ${GhosttyResult[r] ?? r}`);
+        }
+        this.formatter = new DataView(this.memory.buffer).getUint32(ptrPtr, true);
+      } finally {
+        this.exports.ghostty_wasm_free_opaque(ptrPtr);
+      }
+    }
+    const emit = {
+      plain: GhosttyFormatterFormat.PLAIN,
+      vt: GhosttyFormatterFormat.VT,
+      html: GhosttyFormatterFormat.HTML,
+    }[options.emit ?? 'plain'];
+    const scratch = this.exports.ghostty_wasm_alloc(4);
+    try {
+      const view = new DataView(this.memory.buffer);
+      view.setUint32(scratch, emit, true);
+      this.exports.ghostty_formatter_set(this.formatter, GhosttyFormatterOption.EMIT, scratch);
+      view.setUint8(scratch, (options.unwrap ?? true) ? 1 : 0);
+      this.exports.ghostty_formatter_set(this.formatter, GhosttyFormatterOption.UNWRAP, scratch);
+      view.setUint8(scratch, (options.trim ?? true) ? 1 : 0);
+      this.exports.ghostty_formatter_set(this.formatter, GhosttyFormatterOption.TRIM, scratch);
+    } finally {
+      this.exports.ghostty_wasm_free(scratch, 4);
+    }
+    const setSel = (ptr: number) => {
+      const r = this.exports.ghostty_formatter_set(
+        this.formatter,
+        GhosttyFormatterOption.SELECTION,
+        ptr
+      );
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(`ghostty_formatter_set(SELECTION) failed: ${GhosttyResult[r] ?? r}`);
+      }
+    };
+    if (sel === null) setSel(0);
+    else this.withSelection(sel, setSel);
+
+    const outPtrPtr = this.exports.ghostty_wasm_alloc(8);
+    try {
+      const r = this.exports.ghostty_formatter_format_alloc(
+        this.formatter,
+        0,
+        outPtrPtr,
+        outPtrPtr + 4
+      );
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(`ghostty_formatter_format_alloc failed: ${GhosttyResult[r] ?? r}`);
+      }
+      const view = new DataView(this.memory.buffer);
+      const ptr = view.getUint32(outPtrPtr, true);
+      const len = view.getUint32(outPtrPtr + 4, true);
+      try {
+        return len === 0
+          ? ''
+          : new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len));
+      } finally {
+        if (ptr !== 0) this.exports.ghostty_free(0, ptr, len);
+      }
+    } finally {
+      this.exports.ghostty_wasm_free(outPtrPtr, 8);
+    }
   }
 
   // ==========================================================================
