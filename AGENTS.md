@@ -87,6 +87,7 @@ Ghostty WASM Bridge (lib/ghostty.ts)
 | `lib/ghostty-abi.ts`         | ~2000 | GENERATED enums/struct layouts (`bun run gen:abi`) |
 | `scripts/gen-ghostty-abi.ts` | 300   | Generator reading upstream's frozen ABI manifest   |
 | `lib/addons/fit.ts`          | 240   | Responsive terminal sizing                         |
+| `lib/addons/search.ts`       | ~330  | Find bar API over libghostty-vt search             |
 | `demo/bin/demo.js`           | ~710  | HTTP + WebSocket PTY demo server                   |
 
 ### WASM Integration Pattern

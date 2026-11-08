@@ -1744,6 +1744,7 @@ export class Terminal implements ITerminalCore {
     const now = performance.now();
     const next = this.wasmTerm.tickImageAnimations(now);
     this.renderer.render(this.wasmTerm, this.viewportY, this);
+    this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
     if (next !== null) {
       this.imageAnimationTimer = setTimeout(
         () => {

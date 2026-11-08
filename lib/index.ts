@@ -76,6 +76,7 @@ export {
   GhosttyTerminal,
   KeyEncoder,
   MouseEncoder,
+  TerminalSearch,
   CellFlags,
   DirtyState,
   KeyEncoderOption,
@@ -87,6 +88,7 @@ export {
   MouseAction,
   MouseButton,
   PointTag,
+  SearchStatus,
   SelectionAdjust,
   SelectionGestureAutoscroll,
   SelectionGestureBehavior,
@@ -144,6 +146,13 @@ export type { SelectionColumnSpace, SelectionCoordinates } from './selection-man
 // Addons
 export { FitAddon } from './addons/fit';
 export type { ITerminalDimensions } from './addons/fit';
+export { SearchAddon } from './addons/search';
+export type {
+  ISearchOptions,
+  ISearchDecorationOptions,
+  ISearchResult,
+  SearchHighlight,
+} from './addons/search';
 
 // Link providers
 export { OSC8LinkProvider } from './providers/osc8-link-provider';

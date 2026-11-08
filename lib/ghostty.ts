@@ -39,6 +39,10 @@ import {
   GhosttyPointValueLayout,
   GhosttyRenderStateRowSelectionLayout,
   GhosttyResult,
+  GhosttySearchData,
+  GhosttySearchOption,
+  GhosttySearchScroll,
+  GhosttySelectionBufferLayout,
   GhosttySelectionGestureBehaviorsLayout,
   GhosttySelectionGestureData,
   GhosttySelectionGestureEventOption,
@@ -112,6 +116,7 @@ import {
   RowCellsData,
   RowData,
   type RowSelection,
+  type SearchStatus,
   type SelectionAdjust,
   type SelectionGestureAutoscroll,
   type SelectionGestureBehavior,
@@ -178,6 +183,234 @@ function encodeFocusBytes(exports: GhosttyWasmExports, gained: boolean): Uint8Ar
     return new Uint8Array(exports.memory.buffer, buf, n).slice();
   } finally {
     exports.ghostty_wasm_free(buf, bufLen + 4);
+  }
+}
+
+function readGridRefAt(memory: WebAssembly.Memory, ptr: number): GridRef {
+  const view = new DataView(memory.buffer);
+  const o = GhosttyGridRefLayout.offset;
+  return {
+    node: view.getUint32(ptr + o.node, true),
+    x: view.getUint16(ptr + o.x, true),
+    y: view.getUint16(ptr + o.y, true),
+  };
+}
+
+function readSelectionAt(memory: WebAssembly.Memory, ptr: number): TerminalSelection {
+  const o = GhosttySelectionLayout.offset;
+  return {
+    start: readGridRefAt(memory, ptr + o.start),
+    end: readGridRefAt(memory, ptr + o.end),
+    rectangle: new DataView(memory.buffer).getUint8(ptr + o.rectangle) !== 0,
+  };
+}
+
+/**
+ * A search over a terminal's scrollback and both screens (ghostty_search_*).
+ * Results stay in sync with live output: feed() reads the terminal, tick()
+ * makes bounded progress on copied data, run() does both until caught up.
+ * Matches are selections (newest first) with the usual snapshot lifetime.
+ * ASCII letters match case-insensitively; everything else is byte-exact.
+ *
+ * Create one with GhosttyTerminal.createSearch(). The search never scrolls
+ * the WASM viewport, since ntwebterm displays its own.
+ */
+export class TerminalSearch {
+  private exports: GhosttyWasmExports;
+  private memory: WebAssembly.Memory;
+  private search = 0;
+
+  constructor(exports: GhosttyWasmExports, memory: WebAssembly.Memory, terminal: TerminalHandle) {
+    this.exports = exports;
+    this.memory = memory;
+    const ptrPtr = exports.ghostty_wasm_alloc_opaque();
+    try {
+      const r = exports.ghostty_search_new(0, ptrPtr, terminal);
+      if (r !== GhosttyResult.SUCCESS) {
+        throw new Error(`ghostty_search_new failed: ${GhosttyResult[r] ?? r}`);
+      }
+      this.search = new DataView(memory.buffer).getUint32(ptrPtr, true);
+    } finally {
+      exports.ghostty_wasm_free_opaque(ptrPtr);
+    }
+    // The viewport shown is ntwebterm's own, so selecting a match must not
+    // move the WASM one.
+    this.withScratch(4, (view, p) => {
+      view.setUint32(p, GhosttySearchScroll.NONE, true);
+      this.check(
+        'ghostty_search_set(SELECT_SCROLL)',
+        this.exports.ghostty_search_set(this.search, GhosttySearchOption.SELECT_SCROLL, p)
+      );
+    });
+  }
+
+  private check(what: string, r: number): void {
+    if (r !== GhosttyResult.SUCCESS) throw new Error(`${what} failed: ${GhosttyResult[r] ?? r}`);
+  }
+
+  private withScratch<T>(size: number, fn: (view: DataView, ptr: number) => T): T {
+    const ptr = this.exports.ghostty_wasm_alloc(size);
+    try {
+      new Uint8Array(this.memory.buffer, ptr, size).fill(0);
+      return fn(new DataView(this.memory.buffer), ptr);
+    } finally {
+      this.exports.ghostty_wasm_free(ptr, size);
+    }
+  }
+
+  /** Read a 4-byte field; null on GHOSTTY_NO_VALUE. */
+  private getU32(data: GhosttySearchData): number | null {
+    return this.withScratch(4, (_v, p) => {
+      const r = this.exports.ghostty_search_get(this.search, data, p);
+      if (r === GhosttyResult.NO_VALUE) return null;
+      this.check(`ghostty_search_get(${GhosttySearchData[data]})`, r);
+      return new DataView(this.memory.buffer).getUint32(p, true);
+    });
+  }
+
+  /**
+   * Set what to look for. A new needle restarts the search; the same needle
+   * keeps its results; null or '' clears it and the search goes idle.
+   */
+  setNeedle(needle: string | null): void {
+    if (!needle) {
+      this.check(
+        'ghostty_search_set(NEEDLE)',
+        this.exports.ghostty_search_set(this.search, GhosttySearchOption.NEEDLE, 0)
+      );
+      return;
+    }
+    const bytes = new TextEncoder().encode(needle);
+    const total = GhosttyStringLayout.size + bytes.length;
+    this.withScratch(total, (view, p) => {
+      const data = p + GhosttyStringLayout.size;
+      new Uint8Array(this.memory.buffer, data, bytes.length).set(bytes);
+      view.setUint32(p + GhosttyStringLayout.offset.ptr, data, true);
+      view.setUint32(p + GhosttyStringLayout.offset.len, bytes.length, true);
+      this.check(
+        'ghostty_search_set(NEEDLE)',
+        this.exports.ghostty_search_set(this.search, GhosttySearchOption.NEEDLE, p)
+      );
+    });
+  }
+
+  /** The current needle, or null when idle. */
+  get needle(): string | null {
+    return this.withScratch(GhosttyStringLayout.size, (_v, p) => {
+      const r = this.exports.ghostty_search_get(this.search, GhosttySearchData.NEEDLE, p);
+      if (r === GhosttyResult.NO_VALUE) return null;
+      this.check('ghostty_search_get(NEEDLE)', r);
+      const view = new DataView(this.memory.buffer);
+      const ptr = view.getUint32(p + GhosttyStringLayout.offset.ptr, true);
+      const len = view.getUint32(p + GhosttyStringLayout.offset.len, true);
+      return new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len));
+    });
+  }
+
+  get status(): SearchStatus {
+    return this.getU32(GhosttySearchData.STATUS) as SearchStatus;
+  }
+
+  /** Matches found so far on the active screen. */
+  get totalMatches(): number {
+    return this.getU32(GhosttySearchData.TOTAL_MATCHES) ?? 0;
+  }
+
+  /** Index of the selected match, 0 being the newest, or null. */
+  get selectedIndex(): number | null {
+    return this.getU32(GhosttySearchData.SELECTED_INDEX);
+  }
+
+  /** The selected match as a selection snapshot, or null. */
+  get selectedMatch(): TerminalSelection | null {
+    return this.withScratch(GhosttySelectionLayout.size, (_v, p) => {
+      const r = this.exports.ghostty_search_get(this.search, GhosttySearchData.SELECTED_MATCH, p);
+      if (r === GhosttyResult.NO_VALUE) return null;
+      this.check('ghostty_search_get(SELECTED_MATCH)', r);
+      return readSelectionAt(this.memory, p);
+    });
+  }
+
+  private readBuffer(data: GhosttySearchData): TerminalSelection[] {
+    const B = GhosttySelectionBufferLayout;
+    // First ask for the capacity, then read into a buffer of that size.
+    const needed = this.withScratch(B.size, (_v, p) => {
+      const r = this.exports.ghostty_search_get(this.search, data, p);
+      if (r !== GhosttyResult.SUCCESS && r !== GhosttyResult.OUT_OF_SPACE) {
+        this.check(`ghostty_search_get(${GhosttySearchData[data]})`, r);
+      }
+      return new DataView(this.memory.buffer).getUint32(p + B.offset.len, true);
+    });
+    if (needed === 0) return [];
+    const bytes = needed * GhosttySelectionLayout.size;
+    const storage = this.exports.ghostty_wasm_alloc(bytes);
+    try {
+      return this.withScratch(B.size, (view, p) => {
+        view.setUint32(p + B.offset.ptr, storage, true);
+        view.setUint32(p + B.offset.cap, needed, true);
+        this.check(
+          `ghostty_search_get(${GhosttySearchData[data]})`,
+          this.exports.ghostty_search_get(this.search, data, p)
+        );
+        const len = new DataView(this.memory.buffer).getUint32(p + B.offset.len, true);
+        const out: TerminalSelection[] = [];
+        for (let i = 0; i < len; i++) {
+          out.push(readSelectionAt(this.memory, storage + i * GhosttySelectionLayout.size));
+        }
+        return out;
+      });
+    } finally {
+      this.exports.ghostty_wasm_free(storage, bytes);
+    }
+  }
+
+  /** Every match on the active screen, newest (bottom) first through scrollback. */
+  matches(): TerminalSelection[] {
+    return this.readBuffer(GhosttySearchData.MATCHES);
+  }
+
+  /** Matches on the pages covering the WASM viewport, as of the last feed. */
+  viewportMatches(): TerminalSelection[] {
+    return this.readBuffer(GhosttySearchData.VIEWPORT_MATCHES);
+  }
+
+  /** Make bounded progress on copied data; returns the status afterwards. */
+  tick(): SearchStatus {
+    return this.withScratch(4, (_v, p) => {
+      this.check('ghostty_search_tick', this.exports.ghostty_search_tick(this.search, p));
+      return new DataView(this.memory.buffer).getUint32(p, true) as SearchStatus;
+    });
+  }
+
+  /** Read the terminal: pick up changes and give the scrollback scan its next chunk. */
+  feed(): void {
+    this.check('ghostty_search_feed', this.exports.ghostty_search_feed(this.search));
+  }
+
+  /** Feed and tick until caught up with the terminal. Blocks; fine for bounded scrollback. */
+  run(): void {
+    this.check('ghostty_search_run', this.exports.ghostty_search_run(this.search));
+  }
+
+  /** Select the next match toward older content, wrapping; false when there are none. */
+  selectNext(): boolean {
+    const r = this.exports.ghostty_search_select_next(this.search);
+    if (r === GhosttyResult.NO_VALUE) return false;
+    this.check('ghostty_search_select_next', r);
+    return true;
+  }
+
+  /** Select the previous match toward newer content, wrapping; false when there are none. */
+  selectPrev(): boolean {
+    const r = this.exports.ghostty_search_select_prev(this.search);
+    if (r === GhosttyResult.NO_VALUE) return false;
+    this.check('ghostty_search_select_prev', r);
+    return true;
+  }
+
+  free(): void {
+    if (this.search) this.exports.ghostty_search_free(this.search);
+    this.search = 0;
   }
 }
 
@@ -2950,6 +3183,14 @@ export class GhosttyTerminal {
     } finally {
       this.exports.ghostty_wasm_free(outPtrPtr, 8);
     }
+  }
+
+  /**
+   * A search over this terminal's scrollback and screens. The search borrows
+   * the terminal; free it with TerminalSearch.free() in either order.
+   */
+  createSearch(): TerminalSearch {
+    return new TerminalSearch(this.exports, this.memory, this.handle);
   }
 
   // ==========================================================================

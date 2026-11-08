@@ -268,6 +268,35 @@ logical ranges. Each range is still formatted by libghostty.
 `getRowSelection()` and the `gesturePress()`/`gestureDrag()`/`gestureRelease()`
 family.
 
+### Search
+
+`SearchAddon` is an xterm.js-shaped find bar API over libghostty-vt's search
+(`ghostty_search_*`), which covers the scrollback and both screens, follows live
+output, survives alternate-screen switches, resizes and reflow, and matches
+ASCII letters case-insensitively. The addon drives the scrollback scan in short
+background slices, re-feeds the search on every render so new output is picked
+up, scrolls the selected match into view and paints highlights on an overlay
+canvas above whichever renderer is active.
+
+```typescript
+import { SearchAddon } from 'ntwebterm';
+
+const search = new SearchAddon();
+term.loadAddon(search);
+search.onDidChangeResults(({ resultIndex, resultCount }) => {
+  label.textContent = resultCount ? `${resultIndex + 1} of ${resultCount}` : 'No results';
+});
+search.findNext('error', { decorations: { activeMatchBackground: 'rgba(255,140,0,.6)' } });
+search.findPrevious('error');
+search.clearDecorations();
+```
+
+Like Ghostty's own find, `findNext` moves toward older content (up) and
+`findPrevious` toward newer. `regex`, `wholeWord` and `caseSensitive` are not
+supported by the library. `addon.highlights()` exposes the viewport spans for
+custom rendering, and `GhosttyTerminal.createSearch()` returns the raw
+`TerminalSearch` binding (needle, feed/tick/run, matches, select next/prev).
+
 ### Program status (OSC 7501)
 
 Subscribe to structured program-status reports from applications:

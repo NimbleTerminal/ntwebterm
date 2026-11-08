@@ -34,6 +34,7 @@ import {
   GhosttyRenderStateRowOption as RenderStateRowOption,
   GhosttyRenderStateRowCellsData as RowCellsData,
   GhosttyRowData as RowData,
+  GhosttySearchStatus as SearchStatus,
   GhosttySelectionAdjust as SelectionAdjust,
   GhosttySelectionGestureAutoscroll as SelectionGestureAutoscroll,
   GhosttySelectionGestureBehavior as SelectionGestureBehavior,
@@ -69,6 +70,7 @@ export {
   RenderStateRowOption,
   RowCellsData,
   RowData,
+  SearchStatus,
   SelectionAdjust,
   SelectionGestureAutoscroll,
   SelectionGestureBehavior,
@@ -237,6 +239,17 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     event: number,
     outSelPtr: number
   ): number;
+
+  // Search (ghostty/include/ghostty/vt/search.h)
+  ghostty_search_new(allocator: number, searchPtrPtr: number, terminal: TerminalHandle): number;
+  ghostty_search_free(search: number): void;
+  ghostty_search_tick(search: number, outStatusPtr: number): number;
+  ghostty_search_feed(search: number): number;
+  ghostty_search_run(search: number): number;
+  ghostty_search_select_next(search: number): number;
+  ghostty_search_select_prev(search: number): number;
+  ghostty_search_set(search: number, option: number, valuePtr: number): number;
+  ghostty_search_get(search: number, data: number, valuePtr: number): number;
 
   // Formatter (ghostty/include/ghostty/vt/formatter.h)
   ghostty_formatter_terminal_new(
