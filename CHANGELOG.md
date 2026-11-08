@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upstream release with a frozen C ABI, and continues the move from TypeScript reimplementations of terminal behavior to Ghostty's own. Paste, mouse reporting, focus reporting, text selection, search and the OSC/CSI effect callbacks now go through the library, and the hand-written TypeScript versions of selection, mouse encoding and paste sanitizing are gone. The bindings are generated from upstream's ABI manifest and checked against the built WASM. Because some of that behavior changed to match Ghostty and a few TypeScript-only knobs were removed (see Changed), this is a minor version bump.
 
 ### Added
 
