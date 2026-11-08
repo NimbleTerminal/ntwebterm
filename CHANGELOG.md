@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- CI runs on `v*` tags, and the `build-artifacts` workflow publishes a GitHub Release for each tag with the npm tarball, the runtime files (`ntwebterm.js`, `ntwebterm.umd.cjs`, `ntwebterm.d.ts`, `ghostty-vt.wasm`) and `SHA256SUMS`, using that version's changelog section as the notes. The tag must match `package.json`. Dispatch the workflow with `release_tag` to publish a Release for an existing tag. The `built` branch is still refreshed from main only.
-
 ## 0.5.0
 
 This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upstream release with a frozen C ABI, and continues the move from TypeScript reimplementations of terminal behavior to Ghostty's own. Paste, mouse reporting, focus reporting, text selection, search and the OSC/CSI effect callbacks now go through the library, and the hand-written TypeScript versions of selection, mouse encoding and paste sanitizing are gone. The bindings are generated from upstream's ABI manifest and checked against the built WASM. Because some of that behavior changed to match Ghostty and a few TypeScript-only knobs were removed (see Changed), this is a minor version bump.
@@ -30,6 +24,7 @@ This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upst
 - Lift the upstream scrollback byte budget with `SIZE_MAX`; a NULL value now restores the 10,000-byte default instead of removing it.
 - Drop the recycled-row clearing hunk from the patch, since upstream now zeroes recycled rows itself.
 - Raise the CI size budget for `ghostty-vt.wasm` from 1 MiB to 1.25 MiB. The 1.0.0 library (selection, formatter, search, mouse encoder) builds to about 1.03 MiB at ReleaseSmall, up from 0.99 MiB.
+- CI runs on `v*` tags, and the `build-artifacts` workflow publishes a GitHub Release for each tag with the npm tarball, the runtime files (`ntwebterm.js`, `ntwebterm.umd.cjs`, `ntwebterm.d.ts`, `ghostty-vt.wasm`) and `SHA256SUMS`, using that version's changelog section as the notes. The tag must match `package.json`. Dispatch the workflow with `release_tag` to publish a Release for an existing tag. The `built` branch is still refreshed from main only.
 - Selection behavior follows Ghostty: double-click word boundaries are upstream's (`:`, `;`, quotes, brackets, `$`, `|`, ... split words; whitespace runs are words), drags use the half-cell rule (a cell is included once the pointer passes its midpoint), presses outside the repeat interval start a new click sequence, and the selection survives output scrolling the screen because the terminal tracks it. Drags over mixed-direction rows still select the visually swept cells. The hand-written word finder, absolute-row selection state and cell-by-cell text extraction were removed from `SelectionManager`.
 - Mouse modifier bits follow xterm and upstream: Alt/Option sets the 8 bit (previously the Meta/Command key did). The hand-written SGR and X10 encoders, the mode polling and the motion deduplication were removed from the input handler, and `MouseTrackingConfig` lost `hasSgrMouseMode`.
 - Pasted text follows upstream's encoding: newlines become carriage returns when bracketed paste is off (as in xterm.js), and control bytes such as ESC are replaced with spaces rather than the `\x1b[20x~` markers being stripped. The hand-written sanitizers in `Terminal.paste()` and the input handler are gone; `InputHandler` takes an `onPaste` callback and sends raw text to `onData` without one.
