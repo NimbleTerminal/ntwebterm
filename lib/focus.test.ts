@@ -61,14 +61,53 @@ describe('focus reporting', () => {
     focusEvent('focusin');
     expect(data).toEqual([]); // program did not ask
     term.write('\x1b[?1004h');
+    data.length = 0; // drop the enable-time report of the current state
     focusEvent('focusout');
     focusEvent('focusin');
     expect(data).toEqual(['\x1b[O', '\x1b[I']);
   });
 
+  test('enabling mode 1004 reports the current focus state, as xterm and Ghostty do', async () => {
+    const { term, data, container, textarea } = await openTerminal();
+    // open() focuses the terminal.
+    expect(container.contains(document.activeElement)).toBe(true);
+    term.write('\x1b[?1004h');
+    expect(data).toEqual(['\x1b[I']); // focused
+    term.write('\x1b[?1004h'); // already on: no second report
+    term.write('\x1b[?1004l');
+    expect(data).toEqual(['\x1b[I']);
+
+    (document.activeElement as HTMLElement).blur();
+    expect(container.contains(document.activeElement)).toBe(false);
+    term.write('\x1b[?1004h');
+    expect(data).toEqual(['\x1b[I', '\x1b[O']); // not focused
+
+    term.write('\x1b[?1004l');
+    textarea.focus();
+    term.write('\x1b[?1004h');
+    expect(data).toEqual(['\x1b[I', '\x1b[O', '\x1b[I']);
+  });
+
+  test('a program-side reset turns the mode off so the next enable reports again', async () => {
+    const { term, data } = await openTerminal();
+    term.write('\x1b[?1004h');
+    term.write('\x1bc'); // RIS clears mode 1004
+    term.write('\x1b[?1004h');
+    expect(data).toEqual(['\x1b[I', '\x1b[I']);
+  });
+
+  test('term.reset() turns the mode off so the next enable reports again', async () => {
+    const { term, data } = await openTerminal();
+    term.write('\x1b[?1004h');
+    term.reset();
+    term.write('\x1b[?1004h');
+    expect(data).toEqual(['\x1b[I', '\x1b[I']);
+  });
+
   test('focus moving between the terminal element and its textarea is not a change', async () => {
     const { term, data, container, textarea, focusEvent } = await openTerminal();
     term.write('\x1b[?1004h');
+    data.length = 0; // drop the enable-time report
     focusEvent('focusout', container);
     focusEvent('focusin', container);
     container.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: textarea }));
@@ -77,7 +116,7 @@ describe('focus reporting', () => {
 
   test('disableStdin suppresses focus reports', async () => {
     const { term, data, focusEvent } = await openTerminal({ disableStdin: true });
-    term.write('\x1b[?1004h');
+    term.write('\x1b[?1004h'); // the enable-time report is suppressed too
     focusEvent('focusout');
     expect(data).toEqual([]);
   });

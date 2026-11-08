@@ -750,6 +750,8 @@ export class MouseEncoder {
   private exports: GhosttyWasmExports;
   private encoder = 0;
   private event = 0;
+  /** Output buffer size for encode(); kept once grown. */
+  private bufLen = 128;
 
   constructor(exports: GhosttyWasmExports) {
     this.exports = exports;
@@ -872,10 +874,13 @@ export class MouseEncoder {
       ex.ghostty_wasm_free(pos, posSize);
     }
 
-    // 128 bytes covers every format; grow once if upstream asks for more.
-    let bufLen = 128;
+    // Upstream documents 128 bytes as enough for typical events. On
+    // GHOSTTY_OUT_OF_SPACE out_written holds the size needed; the buffer
+    // grows to that (at least doubling) and the event is encoded again.
     for (;;) {
-      const buf = ex.ghostty_wasm_alloc(bufLen + 4);
+      const bufLen = this.bufLen;
+      const allocLen = bufLen + 4;
+      const buf = ex.ghostty_wasm_alloc(allocLen);
       const written = buf + bufLen;
       try {
         const r = ex.ghostty_mouse_encoder_encode(this.encoder, this.event, buf, bufLen, written);
@@ -884,9 +889,9 @@ export class MouseEncoder {
         if (r !== GhosttyResult.OUT_OF_SPACE) {
           throw new Error(`ghostty_mouse_encoder_encode failed: ${GhosttyResult[r] ?? r}`);
         }
-        bufLen = n;
+        this.bufLen = Math.max(n, bufLen * 2);
       } finally {
-        ex.ghostty_wasm_free(buf, bufLen + 4);
+        ex.ghostty_wasm_free(buf, allocLen);
       }
     }
   }
@@ -1164,7 +1169,6 @@ export class GhosttyTerminal {
       const r = this.exports.ghostty_render_state_update(this.renderHandle, this.handle);
       if (r === 0) {
         this.rowDirtyCache = null;
-        this.rowSelectionCache = null;
         this.rowSelectionCache = null;
         this.rowWrapCache = null;
         const dirty = this.rsGetU32(RenderStateData.DIRTY) as DirtyState;

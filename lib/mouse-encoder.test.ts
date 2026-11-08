@@ -135,6 +135,19 @@ describe('GhosttyTerminal.encodeMouse()', () => {
     expect(text(term.encodeMouse(report({ col: 0, row: 0 })))).toBe('\x1b[<0;5;10M');
   });
 
+  test('grows the output buffer when upstream reports GHOSTTY_OUT_OF_SPACE', async () => {
+    const term = await terminal('\x1b[?1000h\x1b[?1006h');
+    expect(text(term.encodeMouse(report()))).toBe('\x1b[<0;2;2M');
+    // Shrink the (lazily created) encoder's buffer below the 9-byte report so
+    // the first encode comes back OUT_OF_SPACE and the buffer must grow.
+    const encoder = (term as unknown as { mouseEncoder: { bufLen: number } }).mouseEncoder;
+    encoder.bufLen = 4;
+    expect(text(term.encodeMouse(report({ action: MouseAction.RELEASE })))).toBe('\x1b[<0;2;2m');
+    expect(encoder.bufLen).toBeGreaterThanOrEqual(9);
+    // The grown size sticks, and a second report needs no retry.
+    expect(text(term.encodeMouse(report({ col: 9, row: 3 })))).toBe('\x1b[<0;10;4M');
+  });
+
   test('tracks resizes of the cell grid', async () => {
     const term = await terminal('\x1b[?1000h\x1b[?1006h');
     expect(text(term.encodeMouse(report({ col: 79, row: 23 })))).toBe('\x1b[<0;80;24M');
