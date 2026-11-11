@@ -17,6 +17,7 @@
 ### Security
 
 - Demo server: `/ws` now requires a per-run token (printed in the startup URL) and checks both `Host` and `Origin` against the server's own names. Before, an Origin that matched the request's own `Host` or `X-Forwarded-Host` was accepted, so a DNS-rebound web page could open a shell. `X-Forwarded-Host` is ignored; set `ALLOWED_HOSTS` to serve through a reverse proxy. Size parameters are clamped, resize messages are never forwarded to the shell, and WebSocket messages are limited to 1 MiB.
+- Kitty graphics PNGs are checked against upstream's 10000-pixel bound and the terminal's image storage limit from their header, before decoding. A few kilobytes of program output could declare a huge image, which was decoded on the main thread and copied into the WASM heap (which never shrinks) before being rejected: a 25 KB PNG grew the heap by 400 MB.
 
 ## 0.5.0
 

@@ -750,6 +750,37 @@ export class KeyEncoder {
 
 let nextImageRevision = 0;
 
+/** Upstream's bounds on one Kitty image (graphics_image.zig): 10000 px a side, 400 MB of pixels. */
+const KITTY_MAX_IMAGE_DIMENSION = 10000;
+const KITTY_MAX_IMAGE_BYTES = 400 * 1024 * 1024;
+
+/**
+ * Read the dimensions a PNG declares in its IHDR chunk without decoding it.
+ * Returns null for anything that is not a PNG with dimensions upstream would
+ * accept.
+ */
+export function readPngHeader(bytes: Uint8Array): { width: number; height: number } | null {
+  // 8-byte signature, then IHDR: length (4), type (4), width (4), height (4).
+  const signature = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
+  ];
+  if (bytes.length < 24) return null;
+  for (let i = 0; i < signature.length; i++) {
+    if (bytes[i] !== signature[i]) return null;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(16, false);
+  const height = view.getUint32(20, false);
+  if (width === 0 || height === 0) return null;
+  if (width > KITTY_MAX_IMAGE_DIMENSION || height > KITTY_MAX_IMAGE_DIMENSION) return null;
+  return { width, height };
+}
+
+/** Bytes of RGBA8 pixels the decoded image will occupy. */
+function pngRgbaBytes(header: { width: number; height: number }): number {
+  return header.width * header.height * 4;
+}
+
 /**
  * GhosttyTerminal - High-performance terminal emulator
  *
@@ -1246,6 +1277,7 @@ export class GhosttyTerminal {
       colorSchemeIndex: number;
       mimeReaderIndex: number;
       randomSecureIndex: number;
+      pngLimit: { bytes: number };
       instancesByHandle: Map<number, GhosttyTerminal>;
     }
   >();
@@ -1273,6 +1305,7 @@ export class GhosttyTerminal {
     colorSchemeIndex: number;
     mimeReaderIndex: number;
     randomSecureIndex: number;
+    pngLimit: { bytes: number };
     instancesByHandle: Map<number, GhosttyTerminal>;
   };
 
@@ -1741,6 +1774,10 @@ export class GhosttyTerminal {
     view.setUint32(ptr + 0, lo, true);
     view.setUint32(ptr + 4, hi, true);
     this.exports.ghostty_terminal_set(this.handle, TerminalOption.KITTY_IMAGE_STORAGE_LIMIT, ptr);
+    if (this.callbackRegistry) {
+      const limit = this.callbackRegistry.pngLimit;
+      limit.bytes = Math.max(limit.bytes, bytes);
+    }
     this.imageEpoch++;
     this.exports.ghostty_wasm_free(ptr, 8);
   }
@@ -3856,8 +3893,16 @@ export class GhosttyTerminal {
       // memory, and a 16-byte out struct to fill.
       // Out layout (GhosttySysImage): u32 width @ 0, u32 height @ 4,
       // u32 data_ptr @ 8, u32 data_len @ 12.
+      //
+      // The PNG is untrusted program output and decodes on the main thread,
+      // so its header is checked first: a few kilobytes of zlib can declare
+      // a 10000x10000 image. Anything that could not be stored anyway is
+      // refused before fast-png allocates for it. The decoder is global to
+      // the module, so the bound is the largest image storage limit any of
+      // its terminals has set.
       const exports = this.exports;
       const memory = this.memory;
+      const pngLimit = { bytes: 0 };
       const decodePngDispatch: DecodePngCallback = (
         _userdata,
         allocator,
@@ -3866,8 +3911,14 @@ export class GhosttyTerminal {
         outImagePtr
       ) => {
         try {
+          const header = readPngHeader(new Uint8Array(memory.buffer, dataPtr, dataLen));
+          if (!header || pngRgbaBytes(header) > Math.min(pngLimit.bytes, KITTY_MAX_IMAGE_BYTES)) {
+            return 0;
+          }
           const pngBytes = new Uint8Array(memory.buffer, dataPtr, dataLen).slice();
           const img = decodePng(pngBytes);
+          // The header was only a claim; hold the decoder to it.
+          if (img.width !== header.width || img.height !== header.height) return 0;
           // fast-png returns 8/16-bit per channel data and various
           // channel counts (plus an optional palette for indexed PNGs).
           // The library expects RGBA u8. Normalize.
@@ -4242,6 +4293,7 @@ export class GhosttyTerminal {
         colorSchemeIndex: slot(fwd.colorScheme),
         mimeReaderIndex: slot(fwd.mimeReader),
         randomSecureIndex: slot(fwd.randomSecure),
+        pngLimit,
         instancesByHandle,
       };
 
