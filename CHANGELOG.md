@@ -11,6 +11,7 @@
 - Keys that produce non-ASCII text are no longer dropped when a program enables the Kitty keyboard protocol: `é`, Cyrillic and other non-Latin layouts encoded to nothing. The key encoder now receives the real text, the key's unshifted codepoint and the modifiers consumed to produce the text, so Shift+a under Kitty disambiguate mode is `A` rather than `CSI 97;2u`.
 - macOS Option+key types the composed character (Option+b is `∫`, Option+L on a German layout is `@`) instead of sending nothing or an Alt chord.
 - Ctrl+Alt+letter is a chord again (`ESC ^A`); only a reported AltGr is treated as text. Dead keys are left to the browser instead of being encoded.
+- Dragging in a program that tracks the mouse (vim, tmux, htop) no longer also makes a local selection and overwrites the clipboard. Hold Shift to select locally; Shift+click and Shift+drag are not reported to the program. A button release is reported only for a press that was reported, and the held-button state is cleared even if the program stops tracking mid-drag.
 - `KeyEncoder.encode()` retries with a larger buffer instead of failing when the sequence exceeds 32 bytes.
 
 ### Security

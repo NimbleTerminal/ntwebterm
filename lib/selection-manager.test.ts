@@ -224,6 +224,37 @@ describe('SelectionManager', () => {
   });
 
   describe('mouse gestures', () => {
+    test('a drag belongs to the program while it tracks the mouse', async () => {
+      const term = await open();
+      term.write('Hello World\x1b[?1000h\x1b[?1006h');
+      const sent: string[] = [];
+      term.onData((d) => sent.push(d));
+      let changes = 0;
+      term.onSelectionChange(() => changes++);
+      drag(term, [0, 0], [4, 0]);
+      expect(manager(term).hasSelection()).toBe(false);
+      expect(changes).toBe(0);
+      expect(sent.some((d) => d.startsWith('\x1b[<0;1;1M'))).toBe(true);
+    });
+
+    test('Shift+drag selects locally and reports nothing while the mouse is tracked', async () => {
+      const term = await open();
+      term.write('Hello World\x1b[?1002h\x1b[?1006h');
+      const sent: string[] = [];
+      term.onData((d) => sent.push(d));
+      const shift = { shiftKey: true };
+      mouse(term, 'mousedown', 0, 0, shift, 0.25);
+      mouse(term, 'mousemove', 4, 0, shift, 0.75);
+      // The input handler listens on the terminal element, so send it the move
+      // and release as well as the document-level ones the selection uses.
+      const canvas = (term as any).renderer.canvas as HTMLCanvasElement;
+      canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, shiftKey: true }));
+      canvas.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, shiftKey: true }));
+      mouse(term, 'mouseup', 4, 0, shift, 0.75);
+      expect(manager(term).getSelection()).toBe('Hello');
+      expect(sent).toEqual([]);
+    });
+
     test('a plain click selects nothing', async () => {
       const term = await open();
       term.write('Hello World');

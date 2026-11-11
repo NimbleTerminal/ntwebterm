@@ -1030,12 +1030,12 @@ export class InputHandler {
   private handleMouseDown(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    // Shift bypasses mouse reporting so the user can select text locally.
+    if (event.shiftKey) return;
 
     this.mouseButtonsPressed |= 1 << event.button;
     const button = InputHandler.DOM_BUTTONS[event.button] ?? MouseButton.UNKNOWN;
     this.reportMouse(MouseAction.PRESS, button, event);
-
-    // Don't prevent default - let SelectionManager handle selection
   }
 
   /**
@@ -1043,9 +1043,13 @@ export class InputHandler {
    */
   private handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
+    // Only a press we reported gets a release. Forget the button even if the
+    // program stopped tracking mid-drag, so later motion is not seen as a drag.
+    const bit = 1 << event.button;
+    if ((this.mouseButtonsPressed & bit) === 0) return;
+    this.mouseButtonsPressed &= ~bit;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
-    this.mouseButtonsPressed &= ~(1 << event.button);
     const button = InputHandler.DOM_BUTTONS[event.button] ?? MouseButton.UNKNOWN;
     this.reportMouse(MouseAction.RELEASE, button, event);
   }
@@ -1057,6 +1061,8 @@ export class InputHandler {
   private handleMouseMove(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    // A Shift-drag is a local selection, unless it continues a reported drag.
+    if (event.shiftKey && this.mouseButtonsPressed === 0) return;
 
     this.reportMouse(MouseAction.MOTION, this.heldButton(), event);
   }

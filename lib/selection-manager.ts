@@ -494,6 +494,10 @@ export class SelectionManager {
     // Focus the terminal so it keeps receiving keyboard input.
     this.focus();
 
+    // A program that tracks the mouse owns clicks and drags. Shift takes the
+    // pointer back for a local selection, as in xterm and Ghostty.
+    if (this.wasmTerm.hasMouseTracking() && !e.shiftKey) return;
+
     const cell = this.pointerToCell(e.clientX, e.clientY);
     const ref = this.wasmTerm.gridRef(PointTag.SCREEN, cell.logicalCol, cell.absRow);
     if (!ref) return;
