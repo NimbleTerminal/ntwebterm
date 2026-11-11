@@ -265,6 +265,7 @@ export class Terminal implements ITerminalCore {
       clipboardRead: options.clipboardRead ?? null,
       colorScheme: options.colorScheme ?? 'auto',
       allowUnsafePaste: options.allowUnsafePaste ?? true,
+      macOptionIsMeta: options.macOptionIsMeta ?? false,
     };
 
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
@@ -752,7 +753,8 @@ export class Terminal implements ITerminalCore {
           // Clipboard pastes go through libghostty-vt like paste().
           this.selectionManager?.clearSelection();
           this.paste(text);
-        }
+        },
+        { macOptionIsMeta: () => this.options.macOptionIsMeta === true }
       );
 
       // Create selection manager (pass textarea for context menu positioning)

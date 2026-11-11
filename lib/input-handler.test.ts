@@ -1364,4 +1364,135 @@ describe('InputHandler', () => {
       handler.dispose();
     });
   });
+  describe('Text keys through the encoder', () => {
+    function makeHandler(
+      kittyFlags: number | null,
+      keyboard: { isMac?: boolean; macOptionIsMeta?: () => boolean } = {}
+    ) {
+      const wasmTerm = ghostty.createTerminal(80, 24);
+      if (kittyFlags !== null) wasmTerm.write(`\x1b[>${kittyFlags}u`);
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => wasmTerm,
+        undefined,
+        { isMac: false, ...keyboard }
+      );
+      return {
+        dispose: () => {
+          handler.dispose();
+          wasmTerm.free();
+        },
+      };
+    }
+    const withAltGraph = (event: MockKeyboardEvent) =>
+      Object.assign(event, { getModifierState: (name: string) => name === 'AltGraph' });
+
+    test('non-ASCII text is sent when the Kitty keyboard protocol is active', () => {
+      const h = makeHandler(1);
+      simulateKey(container, createKeyEvent('KeyE', 'é'));
+      simulateKey(container, createKeyEvent('KeyA', 'ф'));
+      simulateKey(container, createKeyEvent('KeyA', 'Ф', { shift: true }));
+      expect(dataReceived).toEqual(['é', 'ф', 'Ф']);
+      h.dispose();
+    });
+
+    test('Shift+letter is text, not a shifted key report, under Kitty disambiguate', () => {
+      const h = makeHandler(1);
+      simulateKey(container, createKeyEvent('KeyA', 'A', { shift: true }));
+      simulateKey(container, createKeyEvent('Digit1', '!', { shift: true }));
+      expect(dataReceived).toEqual(['A', '!']);
+      h.dispose();
+    });
+
+    test('Kitty report-all carries the unshifted key, shifted key and text', () => {
+      const h = makeHandler(0x1f);
+      simulateKey(container, createKeyEvent('KeyA', 'A', { shift: true }));
+      simulateKey(container, createKeyEvent('KeyA', 'ф'));
+      expect(dataReceived).toEqual(['\x1b[97:65;2;65u', '\x1b[1092::97;;1092u']);
+      h.dispose();
+    });
+
+    test('Ctrl chords keep their legacy bytes, on any layout', () => {
+      const h = makeHandler(null);
+      simulateKey(container, createKeyEvent('KeyA', 'a', { ctrl: true }));
+      simulateKey(container, createKeyEvent('KeyA', 'A', { ctrl: true, shift: true }));
+      simulateKey(container, createKeyEvent('KeyA', 'ф', { ctrl: true }));
+      expect(dataReceived).toEqual(['\x01', '\x01', '\x01']);
+      h.dispose();
+    });
+
+    test('Alt+letter sends ESC prefix off macOS', () => {
+      const h = makeHandler(null);
+      simulateKey(container, createKeyEvent('KeyB', 'b', { alt: true }));
+      expect(dataReceived).toEqual(['\x1bb']);
+      h.dispose();
+    });
+
+    test('Ctrl+Alt+letter is a chord unless AltGr is reported', () => {
+      const h = makeHandler(null);
+      simulateKey(container, createKeyEvent('KeyA', 'a', { ctrl: true, alt: true }));
+      expect(dataReceived).toEqual(['\x1b\x01']);
+      dataReceived.length = 0;
+      simulateKey(container, withAltGraph(createKeyEvent('KeyQ', '@', { ctrl: true, alt: true })));
+      expect(dataReceived).toEqual(['@']);
+      h.dispose();
+    });
+
+    test('AltGr text is sent under the Kitty keyboard protocol', () => {
+      const h = makeHandler(1);
+      simulateKey(container, withAltGraph(createKeyEvent('KeyQ', '@', { ctrl: true, alt: true })));
+      expect(dataReceived).toEqual(['@']);
+      h.dispose();
+    });
+
+    test('macOS Option composes text by default', () => {
+      for (const flags of [null, 1]) {
+        dataReceived.length = 0;
+        const h = makeHandler(flags, { isMac: true });
+        simulateKey(container, createKeyEvent('KeyB', '∫', { alt: true }));
+        simulateKey(container, createKeyEvent('KeyL', '@', { alt: true }));
+        expect(dataReceived).toEqual(['∫', '@']);
+        h.dispose();
+      }
+    });
+
+    test('macOS Option acts as Alt when macOptionIsMeta is set', () => {
+      const h = makeHandler(null, { isMac: true, macOptionIsMeta: () => true });
+      simulateKey(container, createKeyEvent('KeyB', '∫', { alt: true }));
+      simulateKey(container, createKeyEvent('KeyB', 'ı', { alt: true, shift: true }));
+      expect(dataReceived).toEqual(['\x1bb', '\x1bB']);
+      h.dispose();
+    });
+
+    test('dead keys are left to the browser', () => {
+      const h = makeHandler(1, { isMac: true });
+      const event = createKeyEvent('KeyE', 'Dead', { alt: true });
+      simulateKey(container, event);
+      expect(dataReceived).toEqual([]);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      h.dispose();
+    });
+
+    test('text longer than the default encode buffer is not truncated', () => {
+      const encoder = ghostty.createKeyEncoder();
+      const text = 'é'.repeat(40);
+      const bytes = encoder.encode({
+        action: KeyAction.PRESS,
+        key: Key.A,
+        mods: Mods.NONE,
+        utf8: text,
+      });
+      expect(new TextDecoder().decode(bytes)).toBe(text);
+      encoder.dispose();
+    });
+  });
 });

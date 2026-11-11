@@ -315,6 +315,8 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   /** `utf8` is a GhosttyString passed by value: wasm32 passes it as a pointer to { ptr: u32, len: u32 }. */
   ghostty_key_event_set_utf8(event: number, stringPtr: number): number;
   ghostty_key_event_set_unshifted_codepoint(event: number, codepoint: number): void;
+  ghostty_key_event_set_consumed_mods(event: number, mods: number): void;
+  ghostty_key_event_set_composing(event: number, composing: boolean): void;
 
   // Terminal lifecycle
   ghostty_terminal_new(

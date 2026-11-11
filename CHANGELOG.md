@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `macOptionIsMeta` option (default `false`, as in xterm.js): when set, the macOS Option key sends Alt chords (Option+b is `ESC b`) instead of composing characters.
+
+### Fixed
+
+- Keys that produce non-ASCII text are no longer dropped when a program enables the Kitty keyboard protocol: `é`, Cyrillic and other non-Latin layouts encoded to nothing. The key encoder now receives the real text, the key's unshifted codepoint and the modifiers consumed to produce the text, so Shift+a under Kitty disambiguate mode is `A` rather than `CSI 97;2u`.
+- macOS Option+key types the composed character (Option+b is `∫`, Option+L on a German layout is `@`) instead of sending nothing or an Alt chord.
+- Ctrl+Alt+letter is a chord again (`ESC ^A`); only a reported AltGr is treated as text. Dead keys are left to the browser instead of being encoded.
+- `KeyEncoder.encode()` retries with a larger buffer instead of failing when the sequence exceeds 32 bytes.
+
 ### Security
 
 - Demo server: `/ws` now requires a per-run token (printed in the startup URL) and checks both `Host` and `Origin` against the server's own names. Before, an Origin that matched the request's own `Host` or `X-Forwarded-Host` was accepted, so a DNS-rebound web page could open a shell. `X-Forwarded-Host` is ignored; set `ALLOWED_HOSTS` to serve through a reverse proxy. Size parameters are clamped, resize messages are never forwarded to the shell, and WebSocket messages are limited to 1 MiB.

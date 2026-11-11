@@ -686,32 +686,50 @@ export class KeyEncoder {
         } finally {
           this.exports.ghostty_wasm_free(strPtr, GhosttyStringLayout.size);
         }
-        const cp = event.utf8.codePointAt(0);
-        if (cp !== undefined) {
-          this.exports.ghostty_key_event_set_unshifted_codepoint?.(eventPtr, cp);
-        }
+      }
+      // The codepoint the key produces with no modifiers. Callers that know
+      // the layout pass it; otherwise fall back to the text's first codepoint,
+      // which is only right when no modifier changed the text.
+      const unshifted = event.unshiftedCodepoint ?? event.utf8?.codePointAt(0);
+      if (unshifted !== undefined) {
+        this.exports.ghostty_key_event_set_unshifted_codepoint(eventPtr, unshifted);
+      }
+      if (event.consumedMods !== undefined) {
+        this.exports.ghostty_key_event_set_consumed_mods(eventPtr, event.consumedMods);
+      }
+      if (event.composing) {
+        this.exports.ghostty_key_event_set_composing(eventPtr, true);
       }
 
-      const bufferSize = 32;
-      const bufPtr = this.exports.ghostty_wasm_alloc(bufferSize);
+      // Almost every sequence fits in 32 bytes. Text keys can carry more, in
+      // which case the encoder reports the size it needs and we retry once.
       const writtenPtr = this.exports.ghostty_wasm_alloc(4);
       try {
-        const encodeResult = this.exports.ghostty_key_encoder_encode(
-          this.encoder,
-          eventPtr,
-          bufPtr,
-          bufferSize,
-          writtenPtr
-        );
-
-        if (encodeResult !== 0) {
-          throw new Error(`Failed to encode key: ${encodeResult}`);
+        let bufferSize = 32;
+        for (;;) {
+          const bufPtr = this.exports.ghostty_wasm_alloc(bufferSize);
+          try {
+            const encodeResult = this.exports.ghostty_key_encoder_encode(
+              this.encoder,
+              eventPtr,
+              bufPtr,
+              bufferSize,
+              writtenPtr
+            );
+            const written = new DataView(this.exports.memory.buffer).getUint32(writtenPtr, true);
+            if (encodeResult === GhosttyResult.OUT_OF_SPACE && written > bufferSize) {
+              bufferSize = written;
+              continue;
+            }
+            if (encodeResult !== GhosttyResult.SUCCESS) {
+              throw new Error(`Failed to encode key: ${encodeResult}`);
+            }
+            return new Uint8Array(this.exports.memory.buffer, bufPtr, written).slice();
+          } finally {
+            this.exports.ghostty_wasm_free(bufPtr, bufferSize);
+          }
         }
-
-        const bytesWritten = new DataView(this.exports.memory.buffer).getUint32(writtenPtr, true);
-        return new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
       } finally {
-        this.exports.ghostty_wasm_free(bufPtr, bufferSize);
         this.exports.ghostty_wasm_free(writtenPtr, 4);
       }
     } finally {

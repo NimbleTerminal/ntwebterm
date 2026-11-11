@@ -153,6 +153,66 @@ const KEY_MAP: Record<string, Key> = {
 };
 
 /**
+ * The character each physical key produces on a US layout with no modifiers.
+ * Browsers do not report a key's unshifted character, so this is the best
+ * guess when a modifier has changed `event.key` (Shift+1 gives "!").
+ */
+const US_UNSHIFTED: Record<string, string> = {
+  Digit0: '0',
+  Digit1: '1',
+  Digit2: '2',
+  Digit3: '3',
+  Digit4: '4',
+  Digit5: '5',
+  Digit6: '6',
+  Digit7: '7',
+  Digit8: '8',
+  Digit9: '9',
+  Minus: '-',
+  Equal: '=',
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backslash: '\\',
+  Semicolon: ';',
+  Quote: "'",
+  Backquote: '`',
+  Comma: ',',
+  Period: '.',
+  Slash: '/',
+  Space: ' ',
+};
+for (let i = 0; i < 26; i++) {
+  US_UNSHIFTED[`Key${String.fromCharCode(65 + i)}`] = String.fromCharCode(97 + i);
+}
+
+/** True when `s` is exactly one Unicode scalar that is not a control character. */
+function isSingleTextScalar(s: string): boolean {
+  const cp = s.codePointAt(0);
+  if (cp === undefined || s.length !== (cp > 0xffff ? 2 : 1)) return false;
+  return cp >= 0x20 && cp !== 0x7f;
+}
+
+function detectMac(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const platform =
+    (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ??
+    navigator.platform ??
+    '';
+  return /mac|iphone|ipad/i.test(platform);
+}
+
+/** Keyboard behavior that depends on the platform or on terminal options. */
+export interface InputHandlerKeyboardOptions {
+  /**
+   * Whether the macOS Option key acts as Alt/Meta (ESC prefix) instead of
+   * composing characters. Read on every key press. Default: false.
+   */
+  macOptionIsMeta?: () => boolean;
+  /** Override macOS detection (for tests). */
+  isMac?: boolean;
+}
+
+/**
  * InputHandler class
  * Attaches keyboard event listeners to a container and converts
  * keyboard events to terminal input data
@@ -190,6 +250,8 @@ export class InputHandler {
   private mouseConfig?: MouseTrackingConfig;
   private getTerminalCallback?: () => GhosttyTerminal | undefined;
   private onPasteCallback?: (text: string) => void;
+  private isMac: boolean;
+  private macOptionIsMeta: () => boolean;
   private keydownListener: ((e: KeyboardEvent) => void) | null = null;
   private keyupListener: ((e: KeyboardEvent) => void) | null = null;
   private keypressListener: ((e: KeyboardEvent) => void) | null = null;
@@ -231,6 +293,7 @@ export class InputHandler {
    * @param getTerminal - Optional accessor for the WASM terminal (mouse mode queries)
    * @param onPaste - Optional sink for pasted text; the terminal routes it through
    *   libghostty-vt. Without it the raw text is sent to onData.
+   * @param keyboardOptions - Optional platform and Option-key behavior
    */
   constructor(
     ghostty: Ghostty,
@@ -244,7 +307,8 @@ export class InputHandler {
     inputElement?: HTMLElement,
     mouseConfig?: MouseTrackingConfig,
     getTerminal?: () => GhosttyTerminal | undefined,
-    onPaste?: (text: string) => void
+    onPaste?: (text: string) => void,
+    keyboardOptions: InputHandlerKeyboardOptions = {}
   ) {
     this.encoder = ghostty.createKeyEncoder();
     // DEC mode 1036 (alt_esc_prefix) defaults to true in Ghostty
@@ -260,6 +324,8 @@ export class InputHandler {
     this.mouseConfig = mouseConfig;
     this.getTerminalCallback = getTerminal;
     this.onPasteCallback = onPaste;
+    this.isMac = keyboardOptions.isMac ?? detectMac();
+    this.macOptionIsMeta = keyboardOptions.macOptionIsMeta ?? (() => false);
 
     // Attach event listeners
     this.attach();
@@ -360,20 +426,76 @@ export class InputHandler {
     return mods;
   }
 
+  /** AltGr is held: the key composes a character and is not a Ctrl/Alt chord. */
+  private isAltGraph(event: KeyboardEvent): boolean {
+    return event.getModifierState?.('AltGraph') === true;
+  }
+
+  /** The macOS Option key is held and composes a character (the system default). */
+  private isComposingOption(event: KeyboardEvent): boolean {
+    return this.isMac && event.altKey && !this.isAltGraph(event) && !this.macOptionIsMeta();
+  }
+
   /**
-   * Check if this is a printable character with no special modifiers
+   * Check if this key press is plain text: a single character that no
+   * modifier turns into a chord.
    * @param event - KeyboardEvent
    * @returns true if printable character
    */
   private isPrintableCharacter(event: KeyboardEvent): boolean {
-    // If Ctrl, Alt, or Meta (Cmd on Mac) is pressed, it's not a simple printable character
-    // Exception: AltGr (Ctrl+Alt on some keyboards) can produce printable characters
-    if (event.ctrlKey && !event.altKey) return false;
-    if (event.altKey && !event.ctrlKey) return false;
     if (event.metaKey) return false; // Cmd key on Mac
+    if (!isSingleTextScalar(event.key)) return false;
+    // AltGr composes text. Windows reports it as Ctrl+Alt plus the AltGraph state.
+    if (this.isAltGraph(event)) return true;
+    if (event.ctrlKey) return false;
+    // Alt is a chord, except macOS Option, which composes (Option+b types "∫").
+    if (event.altKey) return this.isComposingOption(event);
+    return true;
+  }
 
-    // If key produces a single printable character
-    return event.key.length === 1;
+  /**
+   * Describe the text side of a key event for the encoder: the text the key
+   * produced, the character it would produce unmodified, and which modifiers
+   * went into producing the text rather than forming a chord.
+   */
+  private describeKeyText(
+    event: KeyboardEvent,
+    eventMods: Mods
+  ): { mods: Mods; utf8?: string; unshiftedCodepoint?: number; consumedMods: Mods } {
+    let mods = eventMods;
+    if (!isSingleTextScalar(event.key)) return { mods, consumedMods: Mods.NONE };
+
+    let text = event.key;
+    const us = US_UNSHIFTED[event.code];
+    const altGraph = this.isAltGraph(event);
+    const option = this.isMac && event.altKey && !altGraph;
+
+    if (altGraph) {
+      // The composed character is the input; Ctrl and Alt were spent on it.
+      mods &= ~(Mods.CTRL | Mods.ALT);
+    } else if (option) {
+      if (this.macOptionIsMeta()) {
+        // Undo the Option translation so Alt+b is ESC b, not ESC ∫.
+        if (us) text = event.shiftKey ? us.toUpperCase() : us;
+      } else {
+        mods &= ~Mods.ALT;
+      }
+    }
+
+    // Browsers report Ctrl+Shift+A as "A". Control chords are keyed on the
+    // base letter (Ctrl+A is 0x01 either way), so fold ASCII to lower case.
+    if ((mods & Mods.CTRL) !== 0 && text.charCodeAt(0) < 128) text = text.toLowerCase();
+
+    const lower = text.toLowerCase();
+    let unshifted = text;
+    if (lower !== text && isSingleTextScalar(lower)) {
+      unshifted = lower;
+    } else if ((event.shiftKey || altGraph || option) && us) {
+      unshifted = us;
+    }
+    const consumedMods = event.shiftKey && text !== unshifted ? Mods.SHIFT : Mods.NONE;
+
+    return { mods, utf8: text, unshiftedCodepoint: unshifted.codePointAt(0), consumedMods };
   }
 
   /**
@@ -388,6 +510,10 @@ export class InputHandler {
     if (this.isComposing || event.isComposing || event.keyCode === 229) {
       return;
     }
+
+    // A dead key starts a composition. Leave it to the browser: encoding it
+    // would send the bare key, and preventDefault would cancel the composition.
+    if (event.key === 'Dead') return;
 
     // Emit onKey event first (before any processing)
     if (this.onKeyCallback) {
@@ -446,8 +572,10 @@ export class InputHandler {
       return;
     }
 
-    // Extract modifiers
-    const mods = this.extractModifiers(event);
+    // Extract modifiers, then separate the ones that produced text from the
+    // ones that form a chord.
+    const keyText = this.describeKeyText(event, this.extractModifiers(event));
+    const mods = keyText.mods;
 
     // Handle simple unmodified special keys (plus Shift+Tab) when Kitty protocol is inactive.
     // All other shifted keys (Shift+F1..F12, Shift+Home/End/Insert/Delete/PageUp/PageDown, etc.)
@@ -546,19 +674,16 @@ export class InputHandler {
 
     // For non-printable keys, keys with modifiers, or Kitty protocol keys, encode using Ghostty
     try {
-      // For letter/number keys, even with modifiers, pass the base character
-      // This helps the encoder produce correct control sequences (e.g., Ctrl+A = 0x01)
-      // For special keys (Enter, Arrow keys, etc.), don't pass utf8
-      const utf8 =
-        event.key.length === 1 && event.key.charCodeAt(0) < 128
-          ? event.key.toLowerCase() // Use lowercase for consistency
-          : undefined;
-
+      // Text keys carry their text (any script, not only ASCII) so the
+      // encoder can send it or report it; special keys (Enter, arrows, ...)
+      // have none.
       const encoded = this.encoder.encode({
         action,
         key,
         mods,
-        utf8,
+        utf8: keyText.utf8,
+        unshiftedCodepoint: keyText.unshiftedCodepoint,
+        consumedMods: keyText.consumedMods,
       });
 
       // Convert Uint8Array to string
@@ -614,16 +739,16 @@ export class InputHandler {
     const key = this.mapKeyCode(event.code);
     if (key === null) return;
 
-    const mods = this.extractModifiers(event);
-    const utf8 =
-      event.key.length === 1 && event.key.charCodeAt(0) < 128 ? event.key.toLowerCase() : undefined;
+    const keyText = this.describeKeyText(event, this.extractModifiers(event));
 
     try {
       const encoded = this.encoder.encode({
         action: KeyAction.RELEASE,
         key,
-        mods,
-        utf8,
+        mods: keyText.mods,
+        utf8: keyText.utf8,
+        unshiftedCodepoint: keyText.unshiftedCodepoint,
+        consumedMods: keyText.consumedMods,
       });
       const data = new TextDecoder().decode(encoded);
       if (data.length > 0) {
