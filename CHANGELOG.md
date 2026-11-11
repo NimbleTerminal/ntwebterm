@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
+
+This release hardens ntwebterm against untrusted input and fixes keyboard input outside ASCII. The demo PTY server no longer hands a shell to a DNS-rebound web page, oversized Kitty PNGs are refused before decoding, and callbacks that run during a terminal write can no longer corrupt the parser. Keys that produce non-ASCII text now work under the Kitty keyboard protocol, macOS Option composes characters, and programs that track the mouse own their clicks and drags. It also adds `AutomationAddon` for driving a terminal from JavaScript. Minor version bump because of the new addon and option and because some behavior changed: Ctrl+Alt+letter is a chord again, a drag under mouse tracking no longer selects locally (hold Shift), and the demo server must be opened through the tokenized URL it prints.
 
 ### Added
 
