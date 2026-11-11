@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Demo server: `/ws` now requires a per-run token (printed in the startup URL) and checks both `Host` and `Origin` against the server's own names. Before, an Origin that matched the request's own `Host` or `X-Forwarded-Host` was accepted, so a DNS-rebound web page could open a shell. `X-Forwarded-Host` is ignored; set `ALLOWED_HOSTS` to serve through a reverse proxy. Size parameters are clamped, resize messages are never forwarded to the shell, and WebSocket messages are limited to 1 MiB.
+
 ## 0.5.0
 
 This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upstream release with a frozen C ABI, and continues the move from TypeScript reimplementations of terminal behavior to Ghostty's own. Paste, mouse reporting, focus reporting, text selection, search and the OSC/CSI effect callbacks now go through the library, and the hand-written TypeScript versions of selection, mouse encoding and paste sanitizing are gone. The bindings are generated from upstream's ABI manifest and checked against the built WASM. Because some of that behavior changed to match Ghostty and a few TypeScript-only knobs were removed (see Changed), this is a minor version bump.

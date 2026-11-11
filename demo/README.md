@@ -20,7 +20,7 @@ Works on **Linux** and **macOS** (no Windows support yet).
 - Serves WebSocket PTY on the same port at `/ws` endpoint
 - Opens a real shell session (bash, zsh, etc.)
 - Provides full PTY support (colors, cursor positioning, resize, etc.)
-- Supports reverse proxies (ngrok, nginx, etc.) via X-Forwarded-\* headers
+- Requires a per-run token and checks `Host` and `Origin` on the WebSocket
 
 ## Usage
 
@@ -32,50 +32,27 @@ bun run start
 PORT=3000 bun run start
 ```
 
-Then open http://localhost:8080 in your browser.
+Then open the URL the server prints (it includes the access token).
 
-## Reverse Proxy Support
+## Access control
 
-The server now supports reverse proxies like ngrok, nginx, and others by:
+The server hands out a real shell, so `/ws` only accepts a connection when all of these hold:
 
-- Serving WebSocket on the same HTTP port (no separate port needed)
-- Using relative WebSocket URLs on the client side
-- Automatic protocol detection (HTTP/HTTPS, WS/WSS)
+- The `Host` header names this server (`localhost`, `127.0.0.1`, `[::1]` or `$HOST`, on the configured port). This blocks DNS rebinding.
+- The `Origin` header names this server too. This blocks other web pages.
+- The request carries the per-run token. The server prints a URL containing `?token=...` at startup; open that URL. The token changes on every start.
 
-This means the WebSocket connection automatically adapts to use the same protocol and host as the HTTP connection, making it work seamlessly through any reverse proxy.
+The server listens on `127.0.0.1` unless you set `HOST`.
 
-### Example with ngrok
+### Reverse proxies
+
+Putting this behind a public proxy (ngrok, nginx) exposes a shell on your machine to anyone who learns the token. If you still need it, name the public host explicitly and make sure the proxy forwards the original `Host` header:
 
 ```bash
-# Start the demo server
-bun run start
-
-# In another terminal, expose it via ngrok
-ngrok http 8080
+ALLOWED_HOSTS=example.ngrok.app bun run start
 ```
 
-The terminal will work seamlessly through the ngrok URL! Both HTTP and WebSocket traffic will be properly proxied.
-
-### Example with nginx
-
-```nginx
-server {
-    listen 80;
-    server_name example.com;
-
-    location / {
-        proxy_pass http://localhost:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-}
-```
+`X-Forwarded-Host` is ignored.
 
 ## Security Warning
 

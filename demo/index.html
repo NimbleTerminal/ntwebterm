@@ -237,7 +237,16 @@
 
       function connectWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws?cols=${term.cols}&rows=${term.rows}`;
+        // The demo server prints a URL carrying a per-run token; /ws requires it.
+        const token = new URLSearchParams(window.location.search).get('token') || '';
+        if (!token) {
+          updateConnectionStatus(false);
+          term.write(
+            '\x1b[31mMissing ?token= in the URL. Open the link printed by the demo server.\x1b[0m\r\n'
+          );
+          return;
+        }
+        const wsUrl = `${protocol}//${window.location.host}/ws?cols=${term.cols}&rows=${term.rows}&token=${encodeURIComponent(token)}`;
 
         ws = new WebSocket(wsUrl);
 

@@ -7,6 +7,7 @@
  * Run with: cd demo && bun run start
  */
 
+import crypto from 'crypto';
 import fs from 'fs';
 import http from 'http';
 import { homedir } from 'os';
@@ -29,6 +30,13 @@ const __dirname = path.dirname(__filename);
 const DEV_MODE = process.argv.includes('--dev');
 const HTTP_PORT = process.env.PORT || (DEV_MODE ? 8000 : 8080);
 const HOST = process.env.HOST || '127.0.0.1';
+// Per-run secret required on /ws. The banner prints a URL that carries it.
+const TOKEN = crypto.randomBytes(16).toString('hex');
+// Extra Host values to accept (e.g. a reverse proxy's public name), comma separated.
+const EXTRA_HOSTS = (process.env.ALLOWED_HOSTS || '')
+  .split(',')
+  .map((h) => h.trim().toLowerCase())
+  .filter(Boolean);
 
 // ============================================================================
 // Locate ntwebterm assets
@@ -325,7 +333,8 @@ const HTML_TEMPLATE = `<!doctype html>
 
       // Connect to WebSocket PTY server (use same origin as HTTP server)
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = protocol + '//' + window.location.host + '/ws?cols=' + term.cols + '&rows=' + term.rows;
+      const token = new URLSearchParams(window.location.search).get('token') || '';
+      const wsUrl = protocol + '//' + window.location.host + '/ws?cols=' + term.cols + '&rows=' + term.rows + '&token=' + encodeURIComponent(token);
       let ws;
 
       // Read total canvas pixel dims (CSS pixels). The server stuffs these
@@ -339,6 +348,11 @@ const HTML_TEMPLATE = `<!doctype html>
       }
 
       function connect() {
+        if (!token) {
+          setStatus('disconnected', 'No token');
+          term.write('\\x1b[31mMissing ?token= in the URL. Open the link printed by the demo server.\\x1b[0m\\r\\n');
+          return;
+        }
         setStatus('connecting', 'Connecting...');
         ws = new WebSocket(wsUrl);
 
@@ -450,7 +464,18 @@ const MIME_TYPES = {
 // ============================================================================
 
 const httpServer = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  // Refuse unknown Host headers so a DNS-rebound page cannot read the demo.
+  if (!isAllowedHost(req.headers.host)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('Forbidden: unexpected Host header');
+    return;
+  }
+  const url = parseRequestUrl(req);
+  if (!url) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('Bad request');
+    return;
+  }
   const pathname = url.pathname;
 
   // Serve index page
@@ -537,39 +562,76 @@ function createPtySession(cols, rows) {
 }
 
 // WebSocket server attached to HTTP server (same port)
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
-function isAllowedOrigin(req) {
-  const origin = req.headers.origin;
-  if (!origin) return false;
-  let parsedOrigin;
-  try {
-    parsedOrigin = new URL(origin);
-  } catch {
-    return false;
-  }
-  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || '';
-  const firstHost = String(hostHeader).split(',')[0].trim();
-  if (firstHost && parsedOrigin.host === firstHost) {
-    return true;
-  }
+const MAX_CELLS = 1000;
+const MAX_PIXELS = 32767;
+
+function allowedHosts() {
   const port = String(HTTP_PORT);
-  const allowedHosts = new Set([
+  return new Set([
     `localhost:${port}`,
     `127.0.0.1:${port}`,
     `[::1]:${port}`,
-    `${HOST}:${port}`,
+    `${HOST}:${port}`.toLowerCase(),
+    ...EXTRA_HOSTS,
   ]);
-  return allowedHosts.has(parsedOrigin.host);
+}
+
+function isAllowedHost(hostHeader) {
+  return typeof hostHeader === 'string' && allowedHosts().has(hostHeader.toLowerCase());
+}
+
+// A browser sends Origin on every WebSocket handshake. Both it and Host must
+// name this server: comparing Origin to the request's own Host is not enough,
+// because a DNS-rebound page controls both.
+function isAllowedOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  try {
+    return allowedHosts().has(new URL(origin).host.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function parseRequestUrl(req) {
+  try {
+    return new URL(req.url || '/', 'http://localhost');
+  } catch {
+    return null;
+  }
+}
+
+function hasValidToken(url) {
+  const given = Buffer.from(url.searchParams.get('token') || '');
+  const expected = Buffer.from(TOKEN);
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
+/** Why a /ws upgrade must be refused, or null when it may proceed. */
+function rejectUpgrade(req) {
+  const url = parseRequestUrl(req);
+  if (!url) return '400 Bad Request';
+  if (!isAllowedHost(req.headers.host) || !isAllowedOrigin(req)) return '403 Forbidden';
+  if (!hasValidToken(url)) return '401 Unauthorized';
+  return null;
+}
+
+function clampInt(value, fallback, max) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(n, max);
 }
 
 // Handle HTTP upgrade for WebSocket connections
 httpServer.on('upgrade', (req, socket, head) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  const url = parseRequestUrl(req);
 
-  if (url.pathname === '/ws') {
-    if (!isAllowedOrigin(req)) {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+  if (url?.pathname === '/ws') {
+    const rejection = rejectUpgrade(req);
+    if (rejection) {
+      socket.write(`HTTP/1.1 ${rejection}\r\n\r\n`);
       socket.destroy();
       return;
     }
@@ -582,9 +644,9 @@ httpServer.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const cols = Number.parseInt(url.searchParams.get('cols') || '80');
-  const rows = Number.parseInt(url.searchParams.get('rows') || '24');
+  const url = parseRequestUrl(req);
+  const cols = clampInt(url?.searchParams.get('cols'), 80, MAX_CELLS);
+  const rows = clampInt(url?.searchParams.get('rows'), 24, MAX_CELLS);
 
   // Create PTY
   const ptyProcess = createPtySession(cols, rows);
@@ -610,25 +672,33 @@ wss.on('connection', (ws, req) => {
 
     // Check for resize message
     if (message.startsWith('{')) {
+      let msg = null;
       try {
-        const msg = JSON.parse(message);
-        if (msg.type === 'resize') {
+        msg = JSON.parse(message);
+      } catch {
+        // Not JSON, treat as input
+      }
+      if (msg && msg.type === 'resize') {
+        // A resize message is never forwarded to the shell, valid or not.
+        const newCols = clampInt(msg.cols, 0, MAX_CELLS);
+        const newRows = clampInt(msg.rows, 0, MAX_CELLS);
+        if (newCols === 0 || newRows === 0) return;
+        const xpixel = clampInt(msg.xpixel, 0, MAX_PIXELS);
+        const ypixel = clampInt(msg.ypixel, 0, MAX_PIXELS);
+        try {
           // node-pty 1.2.0+ accepts a third pixelSize arg that sets
           // ws_xpixel / ws_ypixel in the PTY winsize struct. Without it,
           // kitty kittens (icat, etc.) read zeros via TIOCGWINSZ and
           // refuse to render images.
-          if (msg.xpixel > 0 && msg.ypixel > 0) {
-            ptyProcess.resize(msg.cols, msg.rows, {
-              width: msg.xpixel,
-              height: msg.ypixel,
-            });
+          if (xpixel > 0 && ypixel > 0) {
+            ptyProcess.resize(newCols, newRows, { width: xpixel, height: ypixel });
           } else {
-            ptyProcess.resize(msg.cols, msg.rows);
+            ptyProcess.resize(newCols, newRows);
           }
-          return;
+        } catch {
+          // The PTY may already have exited.
         }
-      } catch (e) {
-        // Not JSON, treat as input
+        return;
       }
     }
 
@@ -683,7 +753,13 @@ function printBanner(url) {
     console.log(`  📦 Using local build: ${distPath}`);
   }
   console.log('\n  ⚠️  This server provides shell access.');
-  console.log('     Only use for local development.\n');
+  console.log('     Only use for local development. The token in the URL above');
+  console.log('     is required to connect and changes on every start.');
+  if (!['127.0.0.1', 'localhost', '::1'].includes(HOST)) {
+    console.log(`\n  ⚠️  Listening on ${HOST}: anyone who can reach this port and`);
+    console.log('     learns the token gets a shell as you.');
+  }
+  console.log('');
   console.log('═'.repeat(60));
   console.log('  Press Ctrl+C to stop.\n');
 }
@@ -723,8 +799,9 @@ if (DEV_MODE) {
 
       // ONLY handle /ws - everything else passes through unchanged to Vite
       if (pathname === '/ws') {
-        if (!isAllowedOrigin(req)) {
-          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        const rejection = rejectUpgrade(req);
+        if (rejection) {
+          socket.write(`HTTP/1.1 ${rejection}\r\n\r\n`);
           socket.destroy();
           return;
         }
@@ -744,10 +821,10 @@ if (DEV_MODE) {
     });
   }
 
-  printBanner(`http://localhost:${HTTP_PORT}/demo/`);
+  printBanner(`http://localhost:${HTTP_PORT}/demo/?token=${TOKEN}`);
 } else {
   // Production mode: static file server
   httpServer.listen(HTTP_PORT, HOST, () => {
-    printBanner(`http://localhost:${HTTP_PORT}`);
+    printBanner(`http://localhost:${HTTP_PORT}/?token=${TOKEN}`);
   });
 }

@@ -368,13 +368,15 @@ cd demo && bun install && cd ..
 
 # Dev mode: Vite + same-origin /ws PTY server on port 8000
 bun run demo:dev
-# Open: http://localhost:8000/demo/
+# Open the printed URL: http://localhost:8000/demo/?token=...
 
 # Production mode: serves built dist/ + /ws PTY server on port 8080
 bun run build
 bun run demo
-# Open: http://localhost:8080/
+# Open the printed URL: http://localhost:8080/?token=...
 ```
+
+**Access token:** the demo server prints a URL with a per-run `?token=...`; open that URL. `/ws` rejects connections without the token, or with a `Host`/`Origin` that is not this server (set `ALLOWED_HOSTS` for a reverse proxy).
 
 **WebSocket connects to:** same-origin `/ws` (`ws://localhost:8000/ws` in `--dev` mode, or `ws://localhost:8080/ws` in production mode)
 
