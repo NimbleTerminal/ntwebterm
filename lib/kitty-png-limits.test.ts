@@ -104,3 +104,21 @@ test('a PNG that declares more pixels than the storage limit is refused before d
     terminal.free();
   }
 });
+
+test('lowered PNG limits apply even when another terminal has a larger limit', async () => {
+  const ghostty = await Ghostty.load(wasmPath);
+  const large = ghostty.createTerminal(20, 8);
+  const small = ghostty.createTerminal(20, 8);
+  try {
+    large.setKittyImageStorageLimit(200 * 1024 * 1024);
+    small.setKittyImageStorageLimit(128 * 1024 * 1024);
+    small.setKittyImageStorageLimit(1024);
+    const heap = () => ((ghostty as any).memory as WebAssembly.Memory).buffer.byteLength;
+    const before = heap();
+    transmitPng(small, 11, blankPng(5000, 5000));
+    expect(heap() - before).toBeLessThan(8 * 1024 * 1024);
+  } finally {
+    small.free();
+    large.free();
+  }
+});

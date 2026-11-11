@@ -148,3 +148,28 @@ describe('calls made from inside a terminal callback', () => {
     }
   });
 });
+
+test('a failed deferred operation does not strand later cleanup', async () => {
+  const ghostty = await Ghostty.load(new URL('../ghostty-vt.wasm', import.meta.url).pathname);
+  const term = ghostty.createTerminal(20, 4);
+  const error = spyOn(console, 'error').mockImplementation(() => {});
+  let cleaned = false;
+  try {
+    term.setClipboardWritePolicy(() => {
+      term.deferWhileWriting(() => {
+        throw new Error('deferred failure');
+      });
+      term.deferWhileWriting(() => {
+        cleaned = true;
+        term.free();
+      });
+      return 'denied';
+    });
+    term.write(OSC52_WRITE);
+    expect(cleaned).toBe(true);
+    expect(error).toHaveBeenCalledTimes(1);
+  } finally {
+    term.free();
+    error.mockRestore();
+  }
+});

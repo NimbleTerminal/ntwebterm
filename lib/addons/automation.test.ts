@@ -17,12 +17,12 @@ afterEach(() => term.dispose());
 test('snapshot follows active screen and is detached from later writes', () => {
   term.write('hello');
   const snapshot = automation.snapshot();
-  expect(snapshot.lines[0]).toBe('hello');
+  expect(snapshot.lines[0]).toBe('hello'.padEnd(20));
   expect(snapshot.cursor).toEqual({ x: 5, y: 0 });
   term.write('\x1b[?1049hother');
   expect(automation.snapshot().screen).toBe('alternate');
   expect(automation.snapshot().text).toContain('other');
-  expect(snapshot.lines[0]).toBe('hello');
+  expect(snapshot.lines[0]).toBe('hello'.padEnd(20));
 });
 
 test('text waits inspect current text and resolve across writes', async () => {
@@ -30,7 +30,7 @@ test('text waits inspect current text and resolve across writes', async () => {
   term.write('hel');
   term.write('lo');
   expect((await pending).text).toContain('hello');
-  expect((await automation.waitForText('hello')).lines[0]).toBe('hello');
+  expect((await automation.waitForText('hello')).lines[0]).toBe('hello'.padEnd(20));
 });
 
 test('waits reject on timeout, abort and terminal disposal', async () => {
@@ -71,4 +71,28 @@ test('traces stream copied output and stop when disposed', () => {
   trace.dispose();
   term.write('ignored');
   expect(events).toHaveLength(2);
+});
+
+test('spaces, clears and replies are observable in parse order', async () => {
+  term.write('$ ');
+  await automation.waitForText('$ ');
+  const events: TerminalTraceEvent[] = [];
+  automation.trace((event) => events.push(event));
+  term.write('\x1b[6n');
+  expect(events.map((event) => event.direction)).toEqual(['output', 'input']);
+  const cleared = automation.waitForText(Array(3).fill(' '.repeat(20)).join('\n'));
+  term.clear();
+  expect((await cleared).lines[0]).toBe(' '.repeat(20));
+});
+
+test('public writes and resizes defer together inside a policy callback', async () => {
+  term.wasmTerm!.setClipboardWritePolicy(() => {
+    term.resize(30, 4);
+    expect(term.cols).toBe(20);
+    term.write('nested');
+    return 'denied';
+  });
+  const pending = automation.waitForText('nested');
+  term.write('\x1b]52;c;SGVsbG8=\x07');
+  expect((await pending).cols).toBe(30);
 });

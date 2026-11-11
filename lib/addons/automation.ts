@@ -45,10 +45,15 @@ export class AutomationAddon implements ITerminalAddon {
   snapshot(): TerminalSnapshot {
     const term = this.getTerminal();
     const buffer = term.buffer.active;
-    const lines = Array.from(
-      { length: term.rows },
-      (_, y) => buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? ''
-    );
+    const lines = Array.from({ length: term.rows }, (_, y) => {
+      const line = buffer.getLine(buffer.baseY + y);
+      let text = '';
+      for (let x = 0; x < term.cols; x++) {
+        const cell = line?.getCell(x);
+        text += cell?.getChars() || (cell?.getWidth() === 0 ? '' : ' ');
+      }
+      return text;
+    });
     return {
       cols: term.cols,
       rows: term.rows,

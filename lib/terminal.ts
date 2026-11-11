@@ -963,6 +963,9 @@ export class Terminal implements ITerminalCore {
    * Internal write implementation (extracted from write())
    */
   private writeInternal(data: string | Uint8Array, callback?: () => void): void {
+    const owned = typeof data === 'string' ? data : data.slice();
+    if (this.wasmTerm!.deferWhileWriting(() => this.writeInternal(owned, callback))) return;
+
     // Note: We intentionally do NOT clear selection on write - most modern terminals
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
@@ -971,7 +974,9 @@ export class Terminal implements ITerminalCore {
     const wasAlternate = this.wasmTerm!.isAlternateScreen();
 
     // Write directly to WASM terminal (handles VT parsing internally)
-    this.wasmTerm!.write(data);
+    this.wasmTerm!.write(data, () => {
+      this.writeParsedEmitter.fire(owned);
+    });
     if (this.isDisposed) return;
 
     const isAlternate = this.wasmTerm!.isAlternateScreen();
@@ -1028,7 +1033,6 @@ export class Terminal implements ITerminalCore {
     // Wake the render scheduler — the write almost certainly mutated
     // visible state. Idempotent if a render is already pending.
     this.requestRender();
-    this.writeParsedEmitter.fire(typeof data === 'string' ? data : data.slice());
   }
 
   /**
@@ -1055,6 +1059,7 @@ export class Terminal implements ITerminalCore {
    */
   paste(data: string): void {
     this.assertOpen();
+    if (this.wasmTerm!.deferWhileWriting(() => this.paste(data))) return;
 
     // Don't paste if stdin is disabled
     if (this.options.disableStdin) {
@@ -1075,6 +1080,7 @@ export class Terminal implements ITerminalCore {
   /** Encode a key using current terminal modes and emit it through onData. */
   sendKey(event: KeyEvent): void {
     this.assertOpen();
+    if (this.wasmTerm!.deferWhileWriting(() => this.sendKey({ ...event }))) return;
     if (this.options.disableStdin) return;
     const encoder = this.requireGhostty().createKeyEncoder();
     try {
@@ -1093,6 +1099,7 @@ export class Terminal implements ITerminalCore {
    */
   input(data: string, wasUserInput: boolean = false): void {
     this.assertOpen();
+    if (this.wasmTerm!.deferWhileWriting(() => this.input(data, wasUserInput))) return;
 
     // Don't input if stdin is disabled
     if (this.options.disableStdin) {
@@ -1114,6 +1121,7 @@ export class Terminal implements ITerminalCore {
    */
   resize(cols: number, rows: number): void {
     this.assertOpen();
+    if (this.wasmTerm!.deferWhileWriting(() => this.resize(cols, rows))) return;
 
     if (cols === this.cols && rows === this.rows) {
       return; // No change
@@ -1187,7 +1195,7 @@ export class Terminal implements ITerminalCore {
   clear(): void {
     this.assertOpen();
     // Send ANSI clear screen and cursor home sequences
-    this.wasmTerm!.write('\x1b[2J\x1b[H');
+    this.write('\x1b[2J\x1b[H');
   }
 
   /**
@@ -1195,6 +1203,7 @@ export class Terminal implements ITerminalCore {
    */
   reset(): void {
     this.assertOpen();
+    if (this.wasmTerm!.deferWhileWriting(() => this.reset())) return;
 
     const wasAlternate = this.wasmTerm!.isAlternateScreen();
     this.wasmTerm!.reset();
@@ -1604,6 +1613,7 @@ export class Terminal implements ITerminalCore {
    * Dispose terminal and clean up resources
    */
   dispose(): void {
+    if (this.wasmTerm?.deferWhileWriting(() => this.dispose())) return;
     if (this.isDisposed) {
       return;
     }

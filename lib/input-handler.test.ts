@@ -1469,7 +1469,9 @@ describe('InputHandler', () => {
       const h = makeHandler(null, { isMac: true, macOptionIsMeta: () => true });
       simulateKey(container, createKeyEvent('KeyB', '∫', { alt: true }));
       simulateKey(container, createKeyEvent('KeyB', 'ı', { alt: true, shift: true }));
-      expect(dataReceived).toEqual(['\x1bb', '\x1bB']);
+      simulateKey(container, createKeyEvent('Digit1', '⁄', { alt: true, shift: true }));
+      simulateKey(container, createKeyEvent('Minus', '—', { alt: true, shift: true }));
+      expect(dataReceived).toEqual(['\x1bb', '\x1bB', '\x1b!', '\x1b_']);
       h.dispose();
     });
 

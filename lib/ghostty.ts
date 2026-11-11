@@ -1093,6 +1093,7 @@ export class GhosttyTerminal {
    * read, color scheme, render hold) have to answer synchronously from
    * inside it. Mutating calls made meanwhile wait in deferredOps.
    */
+  private imageStorageLimit = 0;
   private inVtWrite = false;
   private deferredOps: Array<() => void> = [];
   private freed = false;
@@ -1669,7 +1670,7 @@ export class GhosttyTerminal {
    * Queue a mutating call made from inside a terminal callback. Returns true
    * when it was queued; it then runs as soon as the current write returns.
    */
-  private deferWhileWriting(op: () => void): boolean {
+  deferWhileWriting(op: () => void): boolean {
     if (!this.inVtWrite) return false;
     this.deferredOps.push(op);
     return true;
@@ -1677,7 +1678,8 @@ export class GhosttyTerminal {
 
   private runDeferredOps(): void {
     while (this.deferredOps.length > 0 && !this.freed) {
-      this.deferredOps.shift()!();
+      const op = this.deferredOps.shift()!;
+      this.callFromWasm('deferred operation', op);
     }
     this.deferredOps = [];
   }
@@ -1705,26 +1707,30 @@ export class GhosttyTerminal {
    * is queued and written when the current write returns; reset(), resize()
    * and free() are queued the same way.
    */
-  write(data: string | Uint8Array): void {
+  write(data: string | Uint8Array, onParsed?: () => void): void {
     if (this.freed) return;
     if (this.inVtWrite) {
       // The caller may reuse its buffer before the queued write runs.
       const copy = typeof data === 'string' ? data : data.slice();
-      this.deferredOps.push(() => this.write(copy));
+      this.deferredOps.push(() => this.write(copy, onParsed));
       return;
     }
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const ptr = this.exports.ghostty_wasm_alloc(bytes.length);
     if (ptr === 0 && bytes.length > 0) throw new Error('ghostty_wasm_alloc failed');
     new Uint8Array(this.memory.buffer).set(bytes, ptr);
+    const previousPngLimit = this.callbackRegistry?.pngLimit.bytes;
+    if (this.callbackRegistry) this.callbackRegistry.pngLimit.bytes = this.imageStorageLimit;
     this.inVtWrite = true;
     try {
       this.exports.ghostty_terminal_vt_write(this.handle, ptr, bytes.length);
       this.imageEpoch++;
     } finally {
       this.inVtWrite = false;
+      if (this.callbackRegistry) this.callbackRegistry.pngLimit.bytes = previousPngLimit ?? 0;
       this.exports.ghostty_wasm_free(ptr, bytes.length);
     }
+    if (onParsed) this.callFromWasm('parsed output handler', onParsed);
     // Calls the callbacks made on this terminal while it was parsing.
     this.runDeferredOps();
     if (this.freed) return;
@@ -1837,6 +1843,8 @@ export class GhosttyTerminal {
    * but free).
    */
   setKittyImageStorageLimit(bytes: number): void {
+    if (this.deferWhileWriting(() => this.setKittyImageStorageLimit(bytes))) return;
+    this.imageStorageLimit = bytes;
     const ptr = this.exports.ghostty_wasm_alloc(8);
     const view = new DataView(this.memory.buffer);
     const lo = bytes >>> 0;
@@ -1844,10 +1852,6 @@ export class GhosttyTerminal {
     view.setUint32(ptr + 0, lo, true);
     view.setUint32(ptr + 4, hi, true);
     this.exports.ghostty_terminal_set(this.handle, TerminalOption.KITTY_IMAGE_STORAGE_LIMIT, ptr);
-    if (this.callbackRegistry) {
-      const limit = this.callbackRegistry.pngLimit;
-      limit.bytes = Math.max(limit.bytes, bytes);
-    }
     this.imageEpoch++;
     this.exports.ghostty_wasm_free(ptr, 8);
   }
@@ -2090,6 +2094,7 @@ export class GhosttyTerminal {
    * placement sizing. Until called, those query paths return zero.
    */
   setCellPixelSize(cellWidthPx: number, cellHeightPx: number): void {
+    if (this.deferWhileWriting(() => this.setCellPixelSize(cellWidthPx, cellHeightPx))) return;
     const w = Math.max(1, Math.round(cellWidthPx));
     const h = Math.max(1, Math.round(cellHeightPx));
     if (w === this.cellWidthPx && h === this.cellHeightPx) return;
@@ -3974,8 +3979,8 @@ export class GhosttyTerminal {
       // so its header is checked first: a few kilobytes of zlib can declare
       // a 10000x10000 image. Anything that could not be stored anyway is
       // refused before fast-png allocates for it. The decoder is global to
-      // the module, so the bound is the largest image storage limit any of
-      // its terminals has set.
+      // the module, so the bound is set to the current writing terminal’s storage limit
+      // for the duration of each VT write.
       const exports = this.exports;
       const memory = this.memory;
       const pngLimit = { bytes: 0 };

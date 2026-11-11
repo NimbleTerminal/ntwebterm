@@ -573,7 +573,7 @@ function allowedHosts() {
     `localhost:${port}`,
     `127.0.0.1:${port}`,
     `[::1]:${port}`,
-    `${HOST}:${port}`.toLowerCase(),
+    `${HOST.includes(':') && !HOST.startsWith('[') ? `[${HOST}]` : HOST}:${port}`.toLowerCase(),
     ...EXTRA_HOSTS,
   ]);
 }
