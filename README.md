@@ -544,3 +544,43 @@ for the original browser wrapper. Nimble Terminal develops this browser layer in
 ---
 
 Made with :heart: and :fire: by the team behind [Nimble Terminal](https://nimbleterminal.dev).
+
+### Terminal automation
+
+Load `AutomationAddon` on an open terminal to inspect and drive it from JavaScript.
+The host must connect `term.onData` to its PTY and feed PTY output to `term.write`.
+
+```typescript
+import { AutomationAddon, Key, KeyAction, Mods } from 'ntwebterm';
+
+const automation = new AutomationAddon();
+term.loadAddon(automation);
+
+const ready = automation.waitForPrompt({ timeoutMs: 10_000 });
+automation.input('pwd');
+automation.sendKeys([{ key: Key.ENTER, action: KeyAction.PRESS, mods: Mods.NONE }]);
+await ready;
+console.log(automation.snapshot());
+```
+
+- `snapshot()` returns copied active-screen lines, text, cursor, dimensions, screen
+  type, reported working directory, and input modes. It excludes scrollback and
+  ignores the user's scroll position; use `term.buffer` for scrollback access.
+  Text is separated by physical rows, including soft-wrapped rows.
+- `input(text)` sends literal input through `onData`. `sendKeys(events)` uses
+  Ghostty's encoder and current terminal modes. Key events use physical `Key`
+  values; text keys should also supply `utf8` and `unshiftedCodepoint`.
+  `paste(text)` honors the terminal's paste policy and bracketed-paste mode.
+- `waitForText(text, options)` searches the current active screen immediately and
+  after parsed writes. `waitForPrompt(options)` waits for the next primary OSC 133
+  input-start event, requiring shell integration. Register it before sending
+  input. Both accept `timeoutMs` (default 5000) and an `AbortSignal`; disposal
+  rejects pending waits.
+- `trace(listener)` streams timestamped input/output chunks and returns a
+  disposable subscription. Input includes terminal-generated replies. Tracing
+  retains no history, but a listener can record sensitive terminal content.
+  Output is observed after parsing, not after painting.
+- `term.onWriteParsed` exposes parsed output chunks independently of the addon;
+  `term.sendKey(event)` exposes individual protocol-aware key encoding.
+
+This is an in-process API. It does not start sessions or expose a network service.

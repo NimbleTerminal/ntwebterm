@@ -169,3 +169,10 @@ export { CursorBlink } from './cursor-blink';
 // Renderer HUD (active-backend + FPS badge with click + Alt+Shift+R cycling)
 export { installRendererHud, parseRendererFromURL } from './renderer-hud';
 export type { RendererHudOptions } from './renderer-hud';
+
+export { AutomationAddon } from './addons/automation';
+export type {
+  TerminalSnapshot,
+  AutomationWaitOptions,
+  TerminalTraceEvent,
+} from './addons/automation';

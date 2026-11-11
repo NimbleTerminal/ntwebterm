@@ -45,6 +45,7 @@ import type { WebGL2Renderer } from './renderer-webgl';
 import type { WebGPURenderer } from './renderer-webgpu';
 import { ScrollbarOverlay } from './scrollbar-overlay';
 import { SelectionManager } from './selection-manager';
+import type { KeyEvent } from './types';
 import type {
   ClipboardWriteEvent,
   ColorScheme,
@@ -101,6 +102,10 @@ export class Terminal implements ITerminalCore {
   private pendingMouseMove?: MouseEvent;
 
   // Event emitters
+  private writeParsedEmitter = new EventEmitter<string | Uint8Array>();
+  /** Output after parsing; byte arrays are copied for observers. */
+  public readonly onWriteParsed = this.writeParsedEmitter.event;
+
   private dataEmitter = new EventEmitter<string>();
   private resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
   private bellEmitter = new EventEmitter<void>();
@@ -1023,6 +1028,7 @@ export class Terminal implements ITerminalCore {
     // Wake the render scheduler — the write almost certainly mutated
     // visible state. Idempotent if a render is already pending.
     this.requestRender();
+    this.writeParsedEmitter.fire(typeof data === 'string' ? data : data.slice());
   }
 
   /**
@@ -1064,6 +1070,19 @@ export class Terminal implements ITerminalCore {
 
     this.awaitingEcho = true;
     this.processTerminalResponses();
+  }
+
+  /** Encode a key using current terminal modes and emit it through onData. */
+  sendKey(event: KeyEvent): void {
+    this.assertOpen();
+    if (this.options.disableStdin) return;
+    const encoder = this.requireGhostty().createKeyEncoder();
+    try {
+      encoder.setOptionsFromTerminal(this.wasmTerm!.getHandle());
+      this.input(new TextDecoder().decode(encoder.encode(event)), true);
+    } finally {
+      encoder.dispose();
+    }
   }
 
   /**
@@ -1620,6 +1639,7 @@ export class Terminal implements ITerminalCore {
     this.cleanupComponents();
 
     // Dispose event emitters
+    this.writeParsedEmitter.dispose();
     this.dataEmitter.dispose();
     this.resizeEmitter.dispose();
     this.bellEmitter.dispose();
