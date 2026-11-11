@@ -12,6 +12,7 @@
 - macOS Option+key types the composed character (Option+b is `∫`, Option+L on a German layout is `@`) instead of sending nothing or an Alt chord.
 - Ctrl+Alt+letter is a chord again (`ESC ^A`); only a reported AltGr is treated as text. Dead keys are left to the browser instead of being encoded.
 - Dragging in a program that tracks the mouse (vim, tmux, htop) no longer also makes a local selection and overwrites the clipboard. Hold Shift to select locally; Shift+click and Shift+drag are not reported to the program. A button release is reported only for a press that was reported, and the held-button state is cleared even if the program stops tracking mid-drag.
+- Callbacks that answer from inside a terminal write (the `clipboardWrite` policy, `clipboardRead`, the color scheme provider, the render hold handler) can no longer corrupt the parser. libghostty-vt is not reentrant: `write()`, `reset()`, `resize()` and `free()`/`dispose()` called from such a callback are now queued and run when the write returns, `paste()` throws, and an exception from the callback is logged and treated as a refusal instead of unwinding through the WASM frames. `GhosttyTerminal.free()` is idempotent and `write()` after `free()` is ignored.
 - `KeyEncoder.encode()` retries with a larger buffer instead of failing when the sequence exceeds 32 bytes.
 
 ### Security

@@ -1084,6 +1084,15 @@ export class GhosttyTerminal {
   private renderHeld = false;
   private hasCapturedHoldFrame = false;
   private hyperlinkIdsByUri = new Map<string, number>();
+  /**
+   * True while ghostty_terminal_vt_write() is on the stack. The terminal is
+   * not reentrant, and a few application callbacks (clipboard policy and
+   * read, color scheme, render hold) have to answer synchronously from
+   * inside it. Mutating calls made meanwhile wait in deferredOps.
+   */
+  private inVtWrite = false;
+  private deferredOps: Array<() => void> = [];
+  private freed = false;
   private nextHyperlinkId = 1;
 
   /** Return the raw WASM terminal handle. */
@@ -1230,7 +1239,8 @@ export class GhosttyTerminal {
       this.renderHeld = false;
       this.hasCapturedHoldFrame = false;
     }
-    this.renderHoldHandler?.(held);
+    const handler = this.renderHoldHandler;
+    if (handler) this.callFromWasm('render hold handler', () => handler(held));
   }
 
   private internHyperlinkUri(uri: string | null): number {
@@ -1652,16 +1662,69 @@ export class GhosttyTerminal {
   // Lifecycle
   // ==========================================================================
 
+  /**
+   * Queue a mutating call made from inside a terminal callback. Returns true
+   * when it was queued; it then runs as soon as the current write returns.
+   */
+  private deferWhileWriting(op: () => void): boolean {
+    if (!this.inVtWrite) return false;
+    this.deferredOps.push(op);
+    return true;
+  }
+
+  private runDeferredOps(): void {
+    while (this.deferredOps.length > 0 && !this.freed) {
+      this.deferredOps.shift()!();
+    }
+    this.deferredOps = [];
+  }
+
+  /**
+   * Run application code that has to answer from inside a terminal callback.
+   * An exception must not unwind through the WASM frames below us (that
+   * skips libghostty-vt's cleanup and leaves the parser mid-sequence), so it
+   * is reported and the callback answers as if no handler were installed.
+   */
+  private callFromWasm<T>(what: string, fn: () => T): T | undefined {
+    try {
+      return fn();
+    } catch (error) {
+      console.error(`[ntwebterm] ${what} threw inside a terminal callback`, error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Feed VT data to the terminal.
+   *
+   * Called from inside a terminal callback (a clipboard policy or read
+   * handler, the color scheme provider, the render hold handler), the data
+   * is queued and written when the current write returns; reset(), resize()
+   * and free() are queued the same way.
+   */
   write(data: string | Uint8Array): void {
+    if (this.freed) return;
+    if (this.inVtWrite) {
+      // The caller may reuse its buffer before the queued write runs.
+      const copy = typeof data === 'string' ? data : data.slice();
+      this.deferredOps.push(() => this.write(copy));
+      return;
+    }
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const ptr = this.exports.ghostty_wasm_alloc(bytes.length);
+    if (ptr === 0 && bytes.length > 0) throw new Error('ghostty_wasm_alloc failed');
     new Uint8Array(this.memory.buffer).set(bytes, ptr);
+    this.inVtWrite = true;
     try {
       this.exports.ghostty_terminal_vt_write(this.handle, ptr, bytes.length);
       this.imageEpoch++;
     } finally {
+      this.inVtWrite = false;
       this.exports.ghostty_wasm_free(ptr, bytes.length);
     }
+    // Calls the callbacks made on this terminal while it was parsing.
+    this.runDeferredOps();
+    if (this.freed) return;
     // Borrowed C strings were copied by the trampoline. Invoke application code
     // after leaving WASM so listeners may safely write, reset, or dispose.
     const bells = this.pendingBells;
@@ -1715,6 +1778,7 @@ export class GhosttyTerminal {
    * Reset terminal state in-place without changing the underlying WASM handle.
    */
   reset(): void {
+    if (this.deferWhileWriting(() => this.reset())) return;
     this.exports.ghostty_terminal_reset(this.handle);
     this.renderHeld = false;
     this.hasCapturedHoldFrame = false;
@@ -1742,6 +1806,7 @@ export class GhosttyTerminal {
 
   resize(cols: number, rows: number): void {
     if (cols === this._cols && rows === this._rows) return;
+    if (this.deferWhileWriting(() => this.resize(cols, rows))) return;
     this._cols = cols;
     this._rows = rows;
     this.imageEpoch++;
@@ -2030,6 +2095,9 @@ export class GhosttyTerminal {
   }
 
   free(): void {
+    if (this.freed) return;
+    if (this.deferWhileWriting(() => this.free())) return;
+    this.freed = true;
     this.programStatusHandler = undefined;
     this.bellHandler = undefined;
     this.titleChangeHandler = undefined;
@@ -2689,6 +2757,9 @@ export class GhosttyTerminal {
    * `allowUnsafe` is set. Nothing is written on rejection.
    */
   paste(text: string, options: PasteOptions = {}): PasteResult {
+    if (this.inVtWrite) {
+      throw new Error('paste() cannot be called from inside a terminal callback');
+    }
     const utf8 = new TextEncoder();
     const bytes = utf8.encode(text);
     const mime = utf8.encode('text/plain');
@@ -4054,8 +4125,12 @@ export class GhosttyTerminal {
           program: readString(term, ptr + o.name),
           granted: view.getUint8(ptr + o.granted) !== 0,
         };
-        const decision = term.clipboardWritePolicy?.(event);
-        if (decision === undefined) return; // no policy: returning denies the write
+        const policy = term.clipboardWritePolicy;
+        const decision = policy
+          ? term.callFromWasm('clipboard write policy', () => policy(event))
+          : undefined;
+        // No policy, or one that threw: returning without a reply denies the write.
+        if (decision === undefined) return;
         const reply = replyFn(view.getUint32(ptr + o.reply, true));
         if (!reply) return;
         const replyLayout = GhosttyClipboardWriteReplyLayout;
@@ -4083,13 +4158,17 @@ export class GhosttyTerminal {
         for (let i = 0; i < mimesLen; i++) {
           mimes.push(readString(term, mimesPtr + i * GhosttyStringLayout.size));
         }
-        const text = term.clipboardReadHandler({
+        const readHandler = term.clipboardReadHandler;
+        const request = {
           location: locations[view.getUint32(ptr + o.location, true)] ?? 'standard',
           mimes,
           list: view.getUint8(ptr + o.list) !== 0,
           program: readString(term, ptr + o.name),
           granted: view.getUint8(ptr + o.granted) !== 0,
-        });
+        };
+        // A handler that throws denies the read.
+        const text =
+          term.callFromWasm('clipboard read handler', () => readHandler(request)) ?? null;
         const reply = replyFn(view.getUint32(ptr + o.reply, true));
         if (!reply) return;
         // Reply with one text/plain GhosttyClipboardContent on success; the
@@ -4205,7 +4284,10 @@ export class GhosttyTerminal {
       // COLOR_SCHEME: write a GhosttyColorScheme and return true.
       const colorSchemeDispatch: ColorSchemeCallback = (handle, _userdata, outPtr) => {
         const term = instancesByHandle.get(handle);
-        const scheme = term?.colorSchemeProvider?.();
+        const provider = term?.colorSchemeProvider;
+        const scheme = provider
+          ? term!.callFromWasm('color scheme provider', () => provider())
+          : undefined;
         if (!scheme) return 0;
         new DataView(term!.memory.buffer).setUint32(
           outPtr,
