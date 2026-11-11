@@ -168,6 +168,7 @@ python3 -m http.server                # Can't handle .ts imports
 - `demo/index.html` - Interactive shell terminal (requires `bun run demo:dev` or `bun run demo` for `/ws` PTY)
 - `demo/colors-demo.html` - ANSI color showcase (no PTY server needed)
 - `demo/scrollbar-test.html` - Scrollback and scrollbar test (no PTY server needed)
+- `demo/key-check.html` - Guided keyboard check: press the listed keys, see what the browser reported and what the terminal would send (no PTY server needed). Use it on real hardware after changing `input-handler.ts`; automation cannot reproduce OS layout behavior such as macOS Option composition or dead keys.
 
 ### Type Checking
 

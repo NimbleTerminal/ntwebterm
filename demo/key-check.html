@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Keyboard check - ntwebterm</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: light-dark(#1d1d1f, #e6e6e6);
+        --bg: light-dark(#f6f6f7, #17181a);
+        --panel: light-dark(#ffffff, #212327);
+        --line: light-dark(#d9d9de, #3a3d44);
+        --muted: light-dark(#6b6b76, #9a9da6);
+        --pass: light-dark(#1a7f37, #4ac26b);
+        --fail: light-dark(#c62828, #ff7b72);
+        --note: light-dark(#8a5a00, #e3b341);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 20px 16px 40px;
+        font:
+          14px/1.45 system-ui,
+          sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      p {
+        margin: 6px 0;
+        color: var(--muted);
+      }
+      #prompt {
+        margin: 16px 0 10px;
+        padding: 14px 16px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      #prompt strong {
+        font-size: 18px;
+        color: var(--fg);
+      }
+      #prompt .mode {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+      }
+      #terminal {
+        height: 110px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: #1e1e1e;
+      }
+      .buttons {
+        margin: 10px 0 18px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      button {
+        font: inherit;
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--fg);
+        cursor: pointer;
+      }
+      .table-wrap {
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel);
+        border: 1px solid var(--line);
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 6px 10px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+        white-space: nowrap;
+      }
+      td.events {
+        white-space: normal;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      code {
+        font:
+          12px ui-monospace,
+          Menlo,
+          monospace;
+      }
+      tr.current {
+        outline: 2px solid var(--note);
+        outline-offset: -2px;
+      }
+      .pass {
+        color: var(--pass);
+        font-weight: 600;
+      }
+      .fail {
+        color: var(--fail);
+        font-weight: 600;
+      }
+      .note {
+        color: var(--note);
+        font-weight: 600;
+      }
+      textarea#report {
+        width: 100%;
+        height: 140px;
+        margin-top: 10px;
+        font:
+          12px ui-monospace,
+          Menlo,
+          monospace;
+        color: var(--fg);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Keyboard check</h1>
+      <p>
+        Press the key shown. The page records what the browser reported and what the terminal would
+        send, then moves on by itself. No shell is attached. Expected values assume a US layout; on
+        another layout a mismatch may be correct, so read the recorded events.
+      </p>
+
+      <div id="prompt">
+        <div class="mode" id="mode"></div>
+        <strong id="instruction">Loading…</strong>
+        <p id="hint"></p>
+      </div>
+      <div id="terminal"></div>
+      <div class="buttons">
+        <button id="skip" type="button">Skip this key</button>
+        <button id="restart" type="button">Start over</button>
+        <button id="copy" type="button">Copy report</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Mode</th>
+              <th>Press</th>
+              <th>Expected</th>
+              <th>Sent</th>
+              <th>Result</th>
+              <th>Browser events</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <textarea id="report" readonly aria-label="Report"></textarea>
+    </main>
+
+    <script type="module">
+      import { init, Terminal } from '../lib/index.ts';
+
+      const isMac = /mac|iphone|ipad/i.test(
+        navigator.userAgentData?.platform ?? navigator.platform ?? ''
+      );
+      const alt = isMac ? 'Option' : 'Alt';
+
+      // mode: 'legacy' | 'kitty' (disambiguate) | 'meta' (legacy + macOptionIsMeta)
+      // expect: exact string sent, or null to only record what happens.
+      const all = [
+        { mode: 'legacy', press: 'a', expect: 'a' },
+        { mode: 'legacy', press: 'Shift+a', expect: 'A' },
+        { mode: 'legacy', press: 'Ctrl+a', expect: '\x01' },
+        { mode: 'legacy', press: 'Ctrl+Shift+a', expect: '\x01' },
+        { mode: 'legacy', press: `${alt}+b`, expect: isMac ? '∫' : '\x1bb' },
+        { mode: 'legacy', press: `${alt}+Shift+b`, expect: isMac ? 'ı' : '\x1bB' },
+        {
+          mode: 'legacy',
+          press: 'Option+e, then e',
+          expect: 'é',
+          macOnly: true,
+          hint: 'A dead key: the first press should send nothing, the second sends é.',
+        },
+        {
+          mode: 'legacy',
+          press: 'AltGr+q (or any AltGr character)',
+          expect: null,
+          nonMacOnly: true,
+          hint: 'Only on layouts with AltGr. The composed character should be sent as text.',
+        },
+        { mode: 'legacy', press: `Ctrl+${alt}+a`, expect: isMac ? null : '\x1b\x01' },
+        { mode: 'kitty', press: 'a', expect: 'a' },
+        { mode: 'kitty', press: 'Shift+a', expect: 'A' },
+        { mode: 'kitty', press: 'Shift+1', expect: '!' },
+        { mode: 'kitty', press: 'Ctrl+a', expect: '\x1b[97;5u' },
+        { mode: 'kitty', press: 'Escape', expect: '\x1b[27u' },
+        { mode: 'kitty', press: `${alt}+b`, expect: isMac ? '∫' : '\x1b[98;3u' },
+        { mode: 'kitty', press: 'Option+e, then e', expect: 'é', macOnly: true },
+        {
+          mode: 'kitty',
+          press: 'A non-ASCII letter from your layout, if you have one',
+          expect: null,
+          hint: 'For example é, ñ, ö or ф typed directly. It must be sent, not dropped.',
+        },
+        { mode: 'meta', press: 'Option+b', expect: '\x1bb', macOnly: true },
+        { mode: 'meta', press: 'Option+Shift+b', expect: '\x1bB', macOnly: true },
+        { mode: 'meta', press: 'Option+Shift+;', expect: '\x1b:', macOnly: true },
+      ];
+      const cases = all.filter((c) => !(c.macOnly && !isMac) && !(c.nonMacOnly && isMac));
+      const modeNames = {
+        legacy: 'Legacy keyboard',
+        kitty: 'Kitty keyboard protocol',
+        meta: 'Legacy, macOptionIsMeta on',
+      };
+
+      const show = (s) =>
+        s === null || s === undefined
+          ? '(recorded only)'
+          : s === ''
+            ? '(nothing)'
+            : [...s]
+                .map((ch) => {
+                  const cp = ch.codePointAt(0);
+                  if (cp === 0x1b) return 'ESC ';
+                  if (cp < 0x20 || cp === 0x7f) return `^${String.fromCharCode(cp ^ 0x40)}`;
+                  return ch;
+                })
+                .join('')
+                .trim() || '(space)';
+
+      await init();
+      const term = new Terminal({ fontSize: 14, cols: 80, rows: 5 });
+      await term.open(document.getElementById('terminal'));
+
+      const rowsEl = document.getElementById('rows');
+      const reportEl = document.getElementById('report');
+      const instructionEl = document.getElementById('instruction');
+      const modeEl = document.getElementById('mode');
+      const hintEl = document.getElementById('hint');
+
+      let index = 0;
+      let results = [];
+      let sent = '';
+      let events = [];
+      let idle = null;
+
+      function applyMode(mode) {
+        // CSI = flags u sets the Kitty keyboard flags outright.
+        term.write(mode === 'kitty' ? '\x1b[=1u' : '\x1b[=0u');
+        term.options.macOptionIsMeta = mode === 'meta';
+      }
+
+      function render() {
+        rowsEl.replaceChildren(
+          ...cases.map((c, i) => {
+            const r = results[i];
+            const tr = document.createElement('tr');
+            if (i === index) tr.className = 'current';
+            const cells = [
+              String(i + 1),
+              modeNames[c.mode],
+              c.press,
+              show(c.expect),
+              r ? show(r.sent) : '',
+              r ? r.status : '',
+              r ? r.events.join('  ') : '',
+            ];
+            cells.forEach((text, col) => {
+              const td = document.createElement('td');
+              if (col === 3 || col === 4) {
+                const code = document.createElement('code');
+                code.textContent = text;
+                td.append(code);
+              } else {
+                td.textContent = text;
+              }
+              if (col === 5 && r) td.className = r.status;
+              if (col === 6) td.className = 'events';
+              tr.append(td);
+            });
+            return tr;
+          })
+        );
+        const done = index >= cases.length;
+        const c = cases[index];
+        modeEl.textContent = done ? '' : modeNames[c.mode];
+        instructionEl.textContent = done ? 'Done. Copy the report below.' : `Press: ${c.press}`;
+        hintEl.textContent = done ? '' : (c.hint ?? '');
+        const failed = results.filter((r) => r?.status === 'fail').length;
+        reportEl.value = JSON.stringify(
+          {
+            userAgent: navigator.userAgent,
+            platform: navigator.userAgentData?.platform ?? navigator.platform,
+            isMac,
+            failed,
+            results: cases.map((c, i) => ({ ...c, ...(results[i] ?? { status: 'pending' }) })),
+          },
+          null,
+          2
+        );
+      }
+
+      function begin() {
+        sent = '';
+        events = [];
+        clearTimeout(idle);
+        idle = null;
+        if (index < cases.length) applyMode(cases[index].mode);
+        render();
+        term.focus();
+      }
+
+      function finish(status) {
+        const c = cases[index];
+        results[index] = {
+          sent,
+          events,
+          status: status ?? (c.expect === null ? 'note' : sent === c.expect ? 'pass' : 'fail'),
+        };
+        index++;
+        begin();
+      }
+
+      // Evaluate once the keyboard has been quiet, so multi-key cases (dead
+      // keys) and chords with several keydowns are judged as a whole.
+      function touch() {
+        clearTimeout(idle);
+        idle = setTimeout(() => finish(), 1200);
+      }
+
+      const isModifier = (e) => ['Shift', 'Control', 'Alt', 'Meta', 'AltGraph'].includes(e.key);
+
+      // Capture phase: see the event exactly as the terminal's handler will.
+      document.getElementById('terminal').addEventListener(
+        'keydown',
+        (e) => {
+          if (index >= cases.length || isModifier(e)) return;
+          const mods = [
+            e.ctrlKey && 'ctrl',
+            e.altKey && 'alt',
+            e.shiftKey && 'shift',
+            e.metaKey && 'meta',
+            e.getModifierState('AltGraph') && 'AltGraph',
+            e.isComposing && 'composing',
+          ]
+            .filter(Boolean)
+            .join('+');
+          events.push(`[${e.code} key=${JSON.stringify(e.key)}${mods ? ` ${mods}` : ''}]`);
+          touch();
+        },
+        true
+      );
+      term.onData((data) => {
+        if (index >= cases.length) return;
+        sent += data;
+        touch();
+      });
+
+      document.getElementById('skip').addEventListener('click', () => {
+        if (index < cases.length) finish('skipped');
+      });
+      document.getElementById('restart').addEventListener('click', () => {
+        index = 0;
+        results = [];
+        begin();
+      });
+      document.getElementById('copy').addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(reportEl.value);
+        } catch {
+          reportEl.select();
+        }
+        term.focus();
+      });
+
+      window.keyCheck = { term, cases, results: () => results };
+      begin();
+    </script>
+  </body>
+</html>
