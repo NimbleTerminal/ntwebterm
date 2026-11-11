@@ -4,6 +4,8 @@
 
 ### Added
 
+- `AutomationAddon` for inspecting and driving a terminal from JavaScript, in process: `snapshot()` (active-screen lines and text, cursor, size, screen type, working directory, input modes), `input()`, `sendKeys()`, `paste()`, `waitForText()`, `waitForPrompt()` (OSC 133, needs shell integration) and `trace()` for a stream of timestamped input and output chunks. Waits take a timeout and an `AbortSignal` and reject when the addon is disposed.
+- `Terminal.onWriteParsed` fires with each chunk after it has been parsed, and `Terminal.sendKey(event)` encodes one key with the terminal's current keyboard modes and sends it through `onData`.
 - `macOptionIsMeta` option (default `false`, as in xterm.js): when set, the macOS Option key sends Alt chords (Option+b is `ESC b`) instead of composing characters.
 
 ### Fixed
@@ -12,13 +14,14 @@
 - macOS Option+key types the composed character (Option+b is `∫`, Option+L on a German layout is `@`) instead of sending nothing or an Alt chord.
 - Ctrl+Alt+letter is a chord again (`ESC ^A`); only a reported AltGr is treated as text. Dead keys are left to the browser instead of being encoded.
 - Dragging in a program that tracks the mouse (vim, tmux, htop) no longer also makes a local selection and overwrites the clipboard. Hold Shift to select locally; Shift+click and Shift+drag are not reported to the program. A button release is reported only for a press that was reported, and the held-button state is cleared even if the program stops tracking mid-drag.
-- Callbacks that answer from inside a terminal write (the `clipboardWrite` policy, `clipboardRead`, the color scheme provider, the render hold handler) can no longer corrupt the parser. libghostty-vt is not reentrant: `write()`, `reset()`, `resize()` and `free()`/`dispose()` called from such a callback are now queued and run when the write returns, `paste()` throws, and an exception from the callback is logged and treated as a refusal instead of unwinding through the WASM frames. `GhosttyTerminal.free()` is idempotent and `write()` after `free()` is ignored.
+- Callbacks that answer from inside a terminal write (the `clipboardWrite` policy, `clipboardRead`, the color scheme provider, the render hold handler) can no longer corrupt the parser. libghostty-vt is not reentrant: `Terminal.write()`, `input()`, `paste()`, `sendKey()`, `resize()`, `reset()`, `clear()` and `dispose()` called from such a callback are now queued and run, in order, when the write returns (`GhosttyTerminal.paste()` throws there), and an exception from the callback is logged and treated as a refusal instead of unwinding through the WASM frames. `GhosttyTerminal.free()` is idempotent and `write()` after `free()` is ignored.
+- `Terminal.clear()` repaints immediately instead of waiting for the next write.
 - `KeyEncoder.encode()` retries with a larger buffer instead of failing when the sequence exceeds 32 bytes.
 
 ### Security
 
-- Demo server: `/ws` now requires a per-run token (printed in the startup URL) and checks both `Host` and `Origin` against the server's own names. Before, an Origin that matched the request's own `Host` or `X-Forwarded-Host` was accepted, so a DNS-rebound web page could open a shell. `X-Forwarded-Host` is ignored; set `ALLOWED_HOSTS` to serve through a reverse proxy. Size parameters are clamped, resize messages are never forwarded to the shell, and WebSocket messages are limited to 1 MiB.
-- Kitty graphics PNGs are checked against upstream's 10000-pixel bound and the terminal's image storage limit from their header, before decoding. A few kilobytes of program output could declare a huge image, which was decoded on the main thread and copied into the WASM heap (which never shrinks) before being rejected: a 25 KB PNG grew the heap by 400 MB.
+- Demo server: `/ws` now requires a per-run token (printed in the startup URL) and checks both `Host` and `Origin` against the server's own names. Before, an Origin that matched the request's own `Host` or `X-Forwarded-Host` was accepted, so a DNS-rebound web page could open a shell. `X-Forwarded-Host` is ignored; set `ALLOWED_HOSTS` to serve through a reverse proxy; an IPv6 `HOST` is matched in its bracketed form. Size parameters are clamped, resize messages are never forwarded to the shell, and WebSocket messages are limited to 1 MiB.
+- Kitty graphics PNGs are checked against upstream's 10000-pixel bound and the writing terminal's image storage limit from their header, before decoding. A few kilobytes of program output could declare a huge image, which was decoded on the main thread and copied into the WASM heap (which never shrinks) before being rejected: a 25 KB PNG grew the heap by 400 MB.
 
 ## 0.5.0
 

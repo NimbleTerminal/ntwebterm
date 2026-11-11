@@ -478,7 +478,7 @@ export class InputHandler {
         // Undo the Option translation so Alt+b is ESC b, not ESC ∫.
         if (us) {
           const plain = "`1234567890-=[]\\;',./";
-          const shifted = '~!@#$%^&*()_+{}|":<>?';
+          const shifted = '~!@#$%^&*()_+{}|:"<>?';
           const index = plain.indexOf(us);
           text = event.shiftKey ? (index >= 0 ? shifted[index] : us.toUpperCase()) : us;
         }

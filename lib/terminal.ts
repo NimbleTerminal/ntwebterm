@@ -963,8 +963,18 @@ export class Terminal implements ITerminalCore {
    * Internal write implementation (extracted from write())
    */
   private writeInternal(data: string | Uint8Array, callback?: () => void): void {
-    const owned = typeof data === 'string' ? data : data.slice();
-    if (this.wasmTerm!.deferWhileWriting(() => this.writeInternal(owned, callback))) return;
+    // Copy a byte array only when something outlives this call: a deferred
+    // write, or an onWriteParsed listener. Otherwise every PTY chunk would be
+    // duplicated for nobody.
+    let copied: string | Uint8Array | undefined;
+    const owned = () => {
+      copied ??= typeof data === 'string' ? data : data.slice();
+      return copied;
+    };
+    if (this.wasmTerm!.deferWhileWriting(() => this.writeInternal(owned(), callback))) {
+      owned(); // the caller may reuse its buffer before the deferred write runs
+      return;
+    }
 
     // Note: We intentionally do NOT clear selection on write - most modern terminals
     // preserve selection when new data arrives. Selection is cleared by user actions
@@ -974,9 +984,10 @@ export class Terminal implements ITerminalCore {
     const wasAlternate = this.wasmTerm!.isAlternateScreen();
 
     // Write directly to WASM terminal (handles VT parsing internally)
-    this.wasmTerm!.write(data, () => {
-      this.writeParsedEmitter.fire(owned);
-    });
+    this.wasmTerm!.write(
+      data,
+      this.writeParsedEmitter.hasListeners ? () => this.writeParsedEmitter.fire(owned()) : undefined
+    );
     if (this.isDisposed) return;
 
     const isAlternate = this.wasmTerm!.isAlternateScreen();
@@ -1085,7 +1096,10 @@ export class Terminal implements ITerminalCore {
     const encoder = this.requireGhostty().createKeyEncoder();
     try {
       encoder.setOptionsFromTerminal(this.wasmTerm!.getHandle());
-      this.input(new TextDecoder().decode(encoder.encode(event)), true);
+      // Some events encode to nothing (a key release outside the Kitty
+      // protocol); do not hand onData an empty string.
+      const data = new TextDecoder().decode(encoder.encode(event));
+      if (data.length > 0) this.input(data, true);
     } finally {
       encoder.dispose();
     }

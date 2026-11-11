@@ -96,3 +96,24 @@ test('public writes and resizes defer together inside a policy callback', async 
   term.write('\x1b]52;c;SGVsbG8=\x07');
   expect((await pending).cols).toBe(30);
 });
+
+test('a key that encodes to nothing sends no data', () => {
+  const sent: string[] = [];
+  term.onData((data) => sent.push(data));
+  // A release is only reported under the Kitty keyboard protocol.
+  automation.sendKeys([{ key: Key.A, action: KeyAction.RELEASE, mods: Mods.NONE, utf8: 'a' }]);
+  expect(sent).toEqual([]);
+  automation.sendKeys([{ key: Key.A, action: KeyAction.PRESS, mods: Mods.NONE, utf8: 'a' }]);
+  expect(sent).toEqual(['a']);
+});
+
+test('onWriteParsed listeners get bytes the writer cannot change afterwards', () => {
+  const seen: Uint8Array[] = [];
+  term.onWriteParsed((data) => {
+    if (typeof data !== 'string') seen.push(data);
+  });
+  const bytes = new TextEncoder().encode('abc');
+  term.write(bytes);
+  bytes.fill(0x7a);
+  expect(new TextDecoder().decode(seen[0])).toBe('abc');
+});

@@ -1471,7 +1471,9 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('KeyB', 'ı', { alt: true, shift: true }));
       simulateKey(container, createKeyEvent('Digit1', '⁄', { alt: true, shift: true }));
       simulateKey(container, createKeyEvent('Minus', '—', { alt: true, shift: true }));
-      expect(dataReceived).toEqual(['\x1bb', '\x1bB', '\x1b!', '\x1b_']);
+      simulateKey(container, createKeyEvent('Semicolon', 'Ú', { alt: true, shift: true }));
+      simulateKey(container, createKeyEvent('Quote', 'Æ', { alt: true, shift: true }));
+      expect(dataReceived).toEqual(['\x1bb', '\x1bB', '\x1b!', '\x1b_', '\x1b:', '\x1b"']);
       h.dispose();
     });
 
