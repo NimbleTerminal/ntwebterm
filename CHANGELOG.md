@@ -9,6 +9,7 @@ This release hardens ntwebterm against untrusted input and fixes keyboard input 
 - `AutomationAddon` for inspecting and driving a terminal from JavaScript, in process: `snapshot()` (active-screen lines and text, cursor, size, screen type, working directory, input modes), `input()`, `sendKeys()`, `paste()`, `waitForText()`, `waitForPrompt()` (OSC 133, needs shell integration) and `trace()` for a stream of timestamped input and output chunks. Waits take a timeout and an `AbortSignal` and reject when the addon is disposed.
 - `Terminal.onWriteParsed` fires with each chunk after it has been parsed, and `Terminal.sendKey(event)` encodes one key with the terminal's current keyboard modes and sends it through `onData`.
 - `macOptionIsMeta` option (default `false`, as in xterm.js): when set, the macOS Option key sends Alt chords (Option+b is `ESC b`) instead of composing characters.
+- `demo/key-check.html`, a guided keyboard check: it asks for a series of keys in legacy mode, under the Kitty keyboard protocol and with `macOptionIsMeta` on, records each keydown as the browser delivered it and the bytes the terminal would send, and produces a report to copy. Use it on real hardware, since automation cannot reproduce OS layout behavior such as Option composition and dead keys.
 
 ### Fixed
 
