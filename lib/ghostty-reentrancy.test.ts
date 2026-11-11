@@ -71,6 +71,16 @@ describe('calls made from inside a terminal callback', () => {
     expect(lineText(term, 0)).toBe('');
   });
 
+  test('queued resizes apply in order, so the last requested size wins', () => {
+    term.setClipboardWritePolicy(() => {
+      term.resize(30, 6);
+      term.resize(20, 4);
+      return 'denied';
+    });
+    term.write(OSC52_WRITE);
+    expect([term.cols, term.rows]).toEqual([20, 4]);
+  });
+
   test('free() waits for the write and later calls are ignored', () => {
     const other = ghostty.createTerminal(20, 4);
     other.setClipboardWritePolicy(() => {

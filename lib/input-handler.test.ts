@@ -1492,6 +1492,17 @@ describe('InputHandler', () => {
         utf8: text,
       });
       expect(new TextDecoder().decode(bytes)).toBe(text);
+      // The retry must return both buffers with their own sizes; a wrong-size
+      // free corrupts the allocator, which later encodes would trip over.
+      for (let i = 0; i < 200; i++) {
+        const again = encoder.encode({
+          action: KeyAction.PRESS,
+          key: Key.A,
+          mods: Mods.NONE,
+          utf8: text,
+        });
+        expect(again.length).toBe(bytes.length);
+      }
       encoder.dispose();
     });
   });

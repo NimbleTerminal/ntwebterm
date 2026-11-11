@@ -707,17 +707,20 @@ export class KeyEncoder {
       try {
         let bufferSize = 32;
         for (;;) {
-          const bufPtr = this.exports.ghostty_wasm_alloc(bufferSize);
+          // Free with the size this allocation was made with, not the retry size.
+          const allocated = bufferSize;
+          const bufPtr = this.exports.ghostty_wasm_alloc(allocated);
+          if (bufPtr === 0) throw new Error('ghostty_wasm_alloc failed');
           try {
             const encodeResult = this.exports.ghostty_key_encoder_encode(
               this.encoder,
               eventPtr,
               bufPtr,
-              bufferSize,
+              allocated,
               writtenPtr
             );
             const written = new DataView(this.exports.memory.buffer).getUint32(writtenPtr, true);
-            if (encodeResult === GhosttyResult.OUT_OF_SPACE && written > bufferSize) {
+            if (encodeResult === GhosttyResult.OUT_OF_SPACE && written > allocated) {
               bufferSize = written;
               continue;
             }
@@ -726,7 +729,7 @@ export class KeyEncoder {
             }
             return new Uint8Array(this.exports.memory.buffer, bufPtr, written).slice();
           } finally {
-            this.exports.ghostty_wasm_free(bufPtr, bufferSize);
+            this.exports.ghostty_wasm_free(bufPtr, allocated);
           }
         }
       } finally {
@@ -1805,8 +1808,10 @@ export class GhosttyTerminal {
   }
 
   resize(cols: number, rows: number): void {
-    if (cols === this._cols && rows === this._rows) return;
+    // Defer first: a queued resize must compare against the size the queued
+    // calls before it will have set, not the size at the time it was queued.
     if (this.deferWhileWriting(() => this.resize(cols, rows))) return;
+    if (cols === this._cols && rows === this._rows) return;
     this._cols = cols;
     this._rows = rows;
     this.imageEpoch++;
