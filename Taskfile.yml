@@ -24,8 +24,9 @@ tasks:
       - |
         SIZE=$(wc -c < ghostty-vt.wasm | tr -d ' ')
         echo "WASM size: ${SIZE} bytes"
-        if [ "$SIZE" -gt 1048576 ]; then
-          echo "Error: ghostty-vt.wasm exceeds 1 MiB limit (${SIZE} bytes)" >&2
+        # Keep in step with the budget in .github/workflows/ci.yml (1.25 MiB).
+        if [ "$SIZE" -gt 1310720 ]; then
+          echo "Error: ghostty-vt.wasm exceeds 1.25 MiB limit (${SIZE} bytes)" >&2
           exit 1
         fi
       - task: test
