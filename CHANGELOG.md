@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0
+## 0.6.0 (2026-11-11)
 
 This release hardens ntwebterm against untrusted input and fixes keyboard input outside ASCII. The demo PTY server no longer hands a shell to a DNS-rebound web page, oversized Kitty PNGs are refused before decoding, and callbacks that run during a terminal write can no longer corrupt the parser. Keys that produce non-ASCII text now work under the Kitty keyboard protocol, macOS Option composes characters, and programs that track the mouse own their clicks and drags. It also adds `AutomationAddon` for driving a terminal from JavaScript. Minor version bump because of the new addon and option and because some behavior changed: Ctrl+Alt+letter is a chord again, a drag under mouse tracking no longer selects locally (hold Shift), and the demo server must be opened through the tokenized URL it prints.
 
@@ -26,7 +26,7 @@ This release hardens ntwebterm against untrusted input and fixes keyboard input 
 - Demo server: `/ws` now requires a per-run token (printed in the startup URL) and checks both `Host` and `Origin` against the server's own names. Before, an Origin that matched the request's own `Host` or `X-Forwarded-Host` was accepted, so a DNS-rebound web page could open a shell. `X-Forwarded-Host` is ignored; set `ALLOWED_HOSTS` to serve through a reverse proxy; an IPv6 `HOST` is matched in its bracketed form. Size parameters are clamped, resize messages are never forwarded to the shell, and WebSocket messages are limited to 1 MiB.
 - Kitty graphics PNGs are checked against upstream's 10000-pixel bound and the writing terminal's image storage limit from their header, before decoding. A few kilobytes of program output could declare a huge image, which was decoded on the main thread and copied into the WASM heap (which never shrinks) before being rejected: a 25 KB PNG grew the heap by 400 MB.
 
-## 0.5.0
+## 0.5.0 (2026-11-08)
 
 This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upstream release with a frozen C ABI, and continues the move from TypeScript reimplementations of terminal behavior to Ghostty's own. Paste, mouse reporting, focus reporting, text selection, search and the OSC/CSI effect callbacks now go through the library, and the hand-written TypeScript versions of selection, mouse encoding and paste sanitizing are gone. The bindings are generated from upstream's ABI manifest and checked against the built WASM. Because some of that behavior changed to match Ghostty and a few TypeScript-only knobs were removed (see Changed), this is a minor version bump.
 
@@ -60,7 +60,7 @@ This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upst
 
 - Render inverse-video cells with default colors correctly in all three renderers. The background pass skipped them as if their background were the theme default, so WebGL/WebGPU drew the glyph in the theme background color on an unpainted cell (invisible on a dark theme) and Canvas2D dropped the highlight. zsh paints pasted text this way (`paste:standout`), which made pasted text appear black.
 
-## 0.4.2
+## 0.4.2 (2026-11-04)
 
 ### Added
 
@@ -69,7 +69,7 @@ This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upst
 - Add a GitHub Pages browser showcase (`web/`) with interactive multilingual/BiDi, truecolor/SGR, box-drawing/block-element, Kitty graphics, and scrollback/input demos.
 - Add `Taskfile.yml` with `task ci` pre-flight and Pages build/serve targets.
 
-## 0.4.1
+## 0.4.1 (2026-11-03)
 
 ### Fixed
 
@@ -83,7 +83,7 @@ This release brings ntwebterm to parity with libghostty-vt 1.0.0, the first upst
 - Bind the demo server to loopback by default, validate WebSocket origins, block distribution path traversal, and repair the scrollbar demo.
 - Harden Zig downloads with checksum verification, use frozen dependency installs in CI, and support Nix source builds.
 
-## 0.4.0: renamed from the ghostty-web fork
+## 0.4.0 (2026-10-31): renamed from the ghostty-web fork
 
 - Rename the browser package and bundles to ntwebterm, preserving the xterm.js-compatible API and Ghostty core names.
 - WebGPU and WebGL renderers alongside Canvas2D; Kitty graphics layers, placeholders, animation, and browser shared memory.
