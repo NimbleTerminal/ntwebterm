@@ -1,13 +1,132 @@
-name: npm publishing disabled
+name: publish
+
+# Publishes a released version to npmjs.com (as `ntwebterm`) and to GitHub
+# Packages (as `@nimbleterminal/ntwebterm`).
+#
+# It publishes the exact npm tarball attached to the tag's GitHub Release by
+# the build-artifacts workflow, after checking it against the release's
+# SHA256SUMS, so nothing is rebuilt here. Run it from the Actions tab once
+# that release exists. (A release created with GITHUB_TOKEN cannot start
+# another workflow, so this does not run on its own.)
+#
+# Authentication needs no stored secret:
+# - npmjs.com uses trusted publishing (OIDC). The package's trusted publisher
+#   must name NimbleTerminal/ntwebterm and this file, publish.yml. npm attaches
+#   a provenance attestation automatically.
+# - GitHub Packages uses this workflow's GITHUB_TOKEN.
+#
+# A version already present on a registry is skipped, so a run can be repeated
+# after a partial failure.
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish, e.g. v0.6.0'
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: read # download the release assets
+  id-token: write # npm trusted publishing
+  packages: write # GitHub Packages
+
+concurrency:
+  group: publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  NPM_NAME: ntwebterm
+  GITHUB_PACKAGES_NAME: '@nimbleterminal/ntwebterm'
+  GITHUB_PACKAGES_REGISTRY: https://npm.pkg.github.com
 
 jobs:
-  disabled:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Configure ntwebterm npm publishing before enabling releases."
+      - name: Check the tag
+        id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not a v<semver> tag"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          # Prereleases go to the `next` dist-tag so they never become `latest`.
+          if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify the release tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir release
+          cd release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "ntwebterm-${VERSION}.tgz" --pattern SHA256SUMS
+          sha256sum --check --ignore-missing --strict SHA256SUMS
+          grep -q "ntwebterm-${VERSION}.tgz" SHA256SUMS
+          mkdir unpacked
+          tar -xzf "ntwebterm-${VERSION}.tgz" -C unpacked
+          NAME=$(jq -r .name unpacked/package/package.json)
+          PACKED=$(jq -r .version unpacked/package/package.json)
+          if [ "$NAME" != "$NPM_NAME" ] || [ "$PACKED" != "$VERSION" ]; then
+            echo "::error::tarball is $NAME@$PACKED, expected $NPM_NAME@$VERSION"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - name: Update npm
+        run: npm install --global npm@^11.5.1
+
+      - name: Publish to npmjs.com
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          DIST_TAG: ${{ steps.tag.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          if npm view "${NPM_NAME}@${VERSION}" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "${NPM_NAME}@${VERSION} is already on npmjs.com; skipping."
+            exit 0
+          fi
+          # No token is configured, so npm authenticates with the workflow's
+          # OIDC identity. --ignore-scripts: the tarball is already built.
+          npm publish "release/ntwebterm-${VERSION}.tgz" \
+            --registry https://registry.npmjs.org \
+            --access public --tag "$DIST_TAG" --ignore-scripts
+
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          DIST_TAG: ${{ steps.tag.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          # GitHub's npm registry only takes names scoped to the repository
+          # owner, so publish the same files under the scoped name.
+          NPMRC="$RUNNER_TEMP/github-packages.npmrc"
+          # Single quotes on purpose: npm expands ${NODE_AUTH_TOKEN} itself,
+          # so the token is never written to disk.
+          # shellcheck disable=SC2016
+          printf '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n' > "$NPMRC"
+          if npm view "${GITHUB_PACKAGES_NAME}@${VERSION}" version \
+              --registry "$GITHUB_PACKAGES_REGISTRY" --userconfig "$NPMRC" >/dev/null 2>&1; then
+            echo "${GITHUB_PACKAGES_NAME}@${VERSION} is already on GitHub Packages; skipping."
+            exit 0
+          fi
+          cd release/unpacked/package
+          npm pkg set name="$GITHUB_PACKAGES_NAME"
+          npm publish \
+            --registry "$GITHUB_PACKAGES_REGISTRY" --userconfig "$NPMRC" \
+            --access public --tag "$DIST_TAG" --ignore-scripts

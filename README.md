@@ -37,12 +37,26 @@ xterm.js reimplements terminal emulation in JavaScript. Every escape sequence, e
 ## Installation
 
 ```bash
-git clone --branch built https://github.com/NimbleTerminal/ntwebterm.git
+npm install ntwebterm
 ```
 
-The `built` branch carries `dist/ntwebterm.js`, `dist/ntwebterm.d.ts`,
-and `ghostty-vt.wasm`. Serve the runtime files together. npm publishing is
-disabled until the new package is configured; the examples use its future package name.
+The same package is mirrored on GitHub Packages as `@nimbleterminal/ntwebterm`.
+GitHub's npm registry needs a token with `read:packages` even for public
+packages:
+
+```ini
+# .npmrc
+@nimbleterminal:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+Each GitHub Release also carries the npm tarball and the runtime files
+(`ntwebterm.js`, `ntwebterm.umd.cjs`, `ntwebterm.d.ts`, `ghostty-vt.wasm`) with
+`SHA256SUMS`. The `built` branch tracks `main` with the same files prebuilt:
+
+```bash
+git clone --branch built https://github.com/NimbleTerminal/ntwebterm.git
+```
 
 ## Usage
 

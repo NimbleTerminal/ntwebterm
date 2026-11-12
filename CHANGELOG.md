@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Releases are published to npmjs.com as `ntwebterm` and to GitHub Packages as `@nimbleterminal/ntwebterm` by the manually run `publish` workflow. It publishes the tag's release tarball unchanged after checking it against `SHA256SUMS`, authenticates to npmjs.com with trusted publishing (no stored token; npm adds a provenance attestation) and to GitHub Packages with the workflow token, and skips a version a registry already has. The README's installation section describes both registries.
+
 ## 0.6.0 (2026-11-11)
 
 This release hardens ntwebterm against untrusted input and fixes keyboard input outside ASCII. The demo PTY server no longer hands a shell to a DNS-rebound web page, oversized Kitty PNGs are refused before decoding, and callbacks that run during a terminal write can no longer corrupt the parser. Keys that produce non-ASCII text now work under the Kitty keyboard protocol, macOS Option composes characters, and programs that track the mouse own their clicks and drags. It also adds `AutomationAddon` for driving a terminal from JavaScript. Minor version bump because of the new addon and option and because some behavior changed: Ctrl+Alt+letter is a chord again, a drag under mouse tracking no longer selects locally (hold Shift), and the demo server must be opened through the tokenized URL it prints.
