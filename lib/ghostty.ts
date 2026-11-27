@@ -891,7 +891,7 @@ export class MouseEncoder {
     });
   }
 
-  /** Read tracking mode and output format from the terminal. Also forgets the last reported cell. */
+  /** Sync tracking mode and output format. A change to either resets the last reported cell. */
   setFromTerminal(terminal: TerminalHandle): void {
     const r = this.exports.ghostty_mouse_encoder_set_from_terminal(this.encoder, terminal);
     if (r !== GhosttyResult.SUCCESS) {
@@ -955,9 +955,6 @@ export class MouseEncoder {
     this.encoder = 0;
   }
 }
-
-/** DEC private modes that select the mouse tracking mode and report format. */
-const MOUSE_MODES = [9, 1000, 1002, 1003, 1005, 1006, 1015, 1016] as const;
 
 export class GhosttyTerminal {
   private imageRevisions = new Map<number, { generation: bigint; revision: number }>();
@@ -1069,7 +1066,6 @@ export class GhosttyTerminal {
 
   // Mouse reporting state; see encodeMouse().
   private mouseEncoder?: MouseEncoder;
-  private mouseModeSignature = -1;
   private mouseSizeKey = '';
   private mouseAnyButtonPressed = false;
   private pwdChangeHandler?: (pwd: string) => void;
@@ -2833,17 +2829,7 @@ export class GhosttyTerminal {
     this.mouseEncoder ??= new MouseEncoder(this.exports);
     const encoder = this.mouseEncoder;
 
-    // Tracking mode and format live in the terminal. Re-read them only when
-    // one of the controlling modes flipped: set_from_terminal also forgets the
-    // last reported cell, which would defeat motion deduplication.
-    let signature = 0;
-    for (const mode of MOUSE_MODES) {
-      signature = (signature << 1) | (this.getMode(mode, false) ? 1 : 0);
-    }
-    if (signature !== this.mouseModeSignature) {
-      encoder.setFromTerminal(this.handle);
-      this.mouseModeSignature = signature;
-    }
+    encoder.setFromTerminal(this.handle);
 
     const cw = Math.max(1, this.cellWidthPx);
     const ch = Math.max(1, this.cellHeightPx);

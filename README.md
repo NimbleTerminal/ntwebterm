@@ -339,24 +339,23 @@ descendants, and clear everything for a `clear` report with an empty id. Both RI
 and `term.reset()` emit that full clear. The host must also apply the protocol's
 process-exit lifetime rules; the browser terminal cannot detect PTY process exits.
 
-The Ghostty submodule is pinned to **libghostty-vt 1.0.0** (tag `vt-1.0.0`,
-`0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec`, November 6, 2026).
-Rebuilding requires Zig **0.17.0**; use
-`ZIG=/absolute/path/to/zig bun run build` if your system compiler differs.
+The Ghostty submodule is pinned to **libghostty-vt 1.0.2** (tag `vt-1.0.2`,
+`573c4a21e02311ae87844af26b6a7a179f82858e`, November 24, 2026).
+CI uses Zig **0.17.0**, the minimum version for this release. To select a
+compiler explicitly, run `ZIG=/absolute/path/to/zig bun run build`.
 
 ### Library version and build info
 
 The terminal reports which libghostty-vt it runs on, so bug reports can say so:
 
 ```typescript
-term.ghosttyVersion; // "1.0.0" (ghostty_version())
+term.ghosttyVersion; // "1.0.2" (ghostty_version())
 term.ghosttyBuildInfo; // ghostty_build_info(): { version, major, minor, patch, pre, build,
 //   optimize: 'release_small', simd: false, features: { kittyGraphics: true, renderState: true, ... } }
 ```
 
 Both are also available on `Ghostty` (`ghostty.version`, `ghostty.buildInfo`) before any
-terminal is created. The submodule is pinned to the `vt-1.0.0` release tag, so the value
-should match the version in the README unless you built the WASM yourself.
+terminal is created. The version comes from the loaded WASM binary.
 
 ### Upstream libghostty-vt 1.0.0 sync
 

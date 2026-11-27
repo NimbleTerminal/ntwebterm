@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Update libghostty-vt from 1.0.0 to 1.0.2. The patch releases fix scrollback and shell prompt redraws on resize, duplicate same-cell mouse motion reports, and loss of soft wraps and prompt marks when rows move. See the [upstream release notes](https://github.com/ghostty-org/ghostty/blob/vt-1.0.2/dist/doxygen/pages/release-notes.md).
 - Releases are published to npmjs.com as `ntwebterm` and to GitHub Packages as `@nimbleterminal/ntwebterm` by the manually run `publish` workflow. It publishes the tag's release tarball unchanged after checking it against `SHA256SUMS`, authenticates to npmjs.com with trusted publishing (no stored token; npm adds a provenance attestation) and to GitHub Packages with the workflow token, and skips a version a registry already has. The README's installation section describes both registries.
 
 ## 0.6.0 (2026-11-11)
